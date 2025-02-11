@@ -25,7 +25,7 @@ GENESIS_VERIFICATION_KEY=
 ## Postgres variables
 DB_NAME=rosetta-java
 DB_USER=rosetta_db_admin
-DB_SECRET=weakpwd#123_d
+DB_SECRET=weakpwd123d
 DB_HOST=localhost
 DB_PORT=5432
 

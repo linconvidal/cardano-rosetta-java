@@ -194,6 +194,7 @@ echo "Starting Postgres..."
 /etc/init.d/postgresql start
 create_database_and_user
 
+# TODO: Add the snapshot restore here
 
 echo "Starting Yaci indexer..."
 exec java -jar /yaci-indexer/app.jar > /logs/indexer.log &
