@@ -15,14 +15,14 @@ const config = {
   favicon: 'img/favicon.ico',
 
   // Set the production url of your site here
-  url: 'https://cardano-foundation.github.io',
+  url: 'https://linconvidal.github.io',
   // Set the /<baseUrl>/ pathname under which your site is served
   // For GitHub pages deployment, it is often '/<projectName>/'
   baseUrl: '/cardano-rosetta-java/',
 
   // GitHub pages deployment config.
   // If you aren't using GitHub pages, you don't need these.
-  organizationName: 'cardano-foundation', // Usually your GitHub org/user name.
+  organizationName: 'linconvidal', // Usually your GitHub org/user name.
   projectName: 'cardano-rosetta-java', // Usually your repo name.
   deploymentBranch: 'gh-pages',  // Branch for GitHub Pages deployment
 
