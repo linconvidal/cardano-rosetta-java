@@ -9,7 +9,7 @@ import styles from './index.module.css';
 function HomepageHeader() {
   const {siteConfig} = useDocusaurusContext();
   return (
-    <header className="hero">
+    <header className="hero hero--primary">
       <div className="container text--center">
         <h1 className="hero__title">{siteConfig.title}</h1>
         <p className="hero__subtitle">
