@@ -22,7 +22,7 @@ const config = {
 
   // GitHub pages deployment config.
   // If you aren't using GitHub pages, you don't need these.
-  organizationName: 'cardano-foundation', // Usually your GitHub org/user name.
+  organizationName: 'linconvidal', // Usually your GitHub org/user name.
   projectName: 'cardano-rosetta-java', // Usually your repo name.
   deploymentBranch: 'gh-pages',  // Branch for GitHub Pages deployment
 
