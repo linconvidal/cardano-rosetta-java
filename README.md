@@ -58,7 +58,7 @@ graph LR
 
 - **Mesh API (Rosetta) compliant** for standardized blockchain integration
 - **All-in-one Docker Compose deployment** with node, indexer, and API
-- **Spent UTXO pruning support** reducing storage by ~40% (enabled by default)
+- **Spent UTXO pruning support** reducing storage by ~40%
 - **Offline mode** for secure transaction construction
 - **Native asset support** including NFTs and custom tokens
 - **Governance operations** for Conway era features (DRep vote delegation, Pool governance vote)
@@ -67,15 +67,12 @@ graph LR
 ## Quick Start
 
 > [!IMPORTANT]
-> **Spent UTXO Pruning is Enabled by Default**
->
-> Cardano Rosetta Java runs with pruning enabled to optimize for exchange operations:
-> - Reduces storage by ~40% (750GB vs 1.3TB for mainnet) and improves query performance
+> Starting from v1.4.0, [Spent UTXO Pruning](https://cardano-foundation.github.io/cardano-rosetta-java/docs/advanced-configuration/pruning) is **enabled by default** to optimize for exchange operations:
 > - Maintains complete current UTXO set and recent history (default: 30 days)
 > - Historical block/transaction queries return incomplete data beyond the safety margin
 > - Transaction search by hash always works, address search limited to recent history
 >
-> To disable pruning and maintain full history, set `REMOVE_SPENT_UTXOS=false` in your environment file. See [pruning documentation](https://cardano-foundation.github.io/cardano-rosetta-java/docs/advanced-configuration/pruning) for details.
+> To keep full history, set `REMOVE_SPENT_UTXOS=false` in your env file.
 
 <details>
 <summary><b>Preprod Testnet</b> (~3 hours sync time)</summary>
@@ -142,11 +139,10 @@ curl -X POST http://localhost:8082/network/status \
 cat .env.docker-compose .env.docker-compose-profile-mid-level > .env
 docker compose logs -f
 ```
+</details>
 
 > [!NOTE]
-> Mithril snapshots are used automatically to accelerate initial sync. Full sync times vary based on hardware and network conditions.
-
-</details>
+> [Mithril snapshots](https://mithril.network/doc/) are used automatically to accelerate initial sync. Full sync times vary based on hardware and network conditions.
 
 ## System Requirements
 
@@ -166,9 +162,11 @@ See [Quick Start](#quick-start) above or the [installation documentation](https:
 
 ### Other Methods
 
-- **Pre-built images**: [DockerHub](https://hub.docker.com/r/cardanofoundation/cardano-rosetta-java)
-  > [!WARNING]
-  > The single Docker image deployment (cardanofoundation/cardano-rosetta-java) is deprecated. We strongly recommend using Docker Compose deployment for better modularity, resource management, and maintenance.
+
+> [!WARNING]
+> The single Docker image deployment is deprecated. We strongly recommend using Docker Compose deployment for better modularity, resource management, and maintenance.
+
+- **Pre-built all-in-one images**: [DockerHub](https://hub.docker.com/r/cardanofoundation/cardano-rosetta-java)
 - **Build from source**: [Documentation](https://cardano-foundation.github.io/cardano-rosetta-java/docs/development/build)
 
 ## Configuration
@@ -183,17 +181,9 @@ See [Quick Start](#quick-start) above or the [installation documentation](https:
 | `REMOVE_SPENT_UTXOS_LAST_BLOCKS_GRACE_COUNT` | Safety margin for pruning (in blocks) | `129600` (~30 days) |
 | `API_PORT` | Mesh API port | `8082` |
 
-Full environment variable reference: [documentation](https://cardano-foundation.github.io/cardano-rosetta-java/docs/install-and-deploy/env-vars).
+Check [environment variable reference](https://cardano-foundation.github.io/cardano-rosetta-java/docs/install-and-deploy/env-vars) for details.
 
-### Pruning Configuration
-
-Key environment variables for controlling pruning behavior:
-- `REMOVE_SPENT_UTXOS`: Enable/disable pruning (default: `true`)
-- `REMOVE_SPENT_UTXOS_LAST_BLOCKS_GRACE_COUNT`: Safety margin in blocks (default: `129600` ~30 days)
-
-For detailed configuration, see [pruning documentation](https://cardano-foundation.github.io/cardano-rosetta-java/docs/advanced-configuration/pruning).
-
-## API Usage
+## API Usage & Operations
 
 <details>
 <summary><b>Common Operations</b></summary>
@@ -227,8 +217,6 @@ curl -X POST http://localhost:8082/construction/submit \
 
 </details>
 
-## Operations
-
 <details>
 <summary><b>Monitoring & Troubleshooting</b></summary>
 
@@ -256,17 +244,14 @@ docker compose logs -f cardano-node
 
 </details>
 
-## Documentation
+## Documentation & Support
 
 - [Full Documentation](https://cardano-foundation.github.io/cardano-rosetta-java/docs/intro)
 - [Mesh API Reference](https://docs.cdp.coinbase.com/mesh/docs/api-reference)
 - [Cardano Specific API Additions](https://cardano-foundation.github.io/cardano-rosetta-java/docs/core-concepts/cardano-addons)
 - [Hardware Profiles](https://cardano-foundation.github.io/cardano-rosetta-java/docs/install-and-deploy/hardware-profiles)
-
-## Support
-
-- **Issues**: [GitHub Issues](https://github.com/cardano-foundation/cardano-rosetta-java/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/cardano-foundation/cardano-rosetta-java/discussions)
+- [GitHub Issues](https://github.com/cardano-foundation/cardano-rosetta-java/issues)
+- [GitHub Discussions](https://github.com/cardano-foundation/cardano-rosetta-java/discussions)
 
 ## Contributing
 
