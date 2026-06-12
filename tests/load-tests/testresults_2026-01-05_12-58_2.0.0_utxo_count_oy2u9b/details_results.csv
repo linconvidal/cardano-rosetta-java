@@ -1,0 +1,11 @@
+Hardware_Profile,Dimension,Level,Friendly_Display,Endpoint,Concurrency,p95(ms),p99(ms),Meets_SLA,Complete_Requests,Requests_per_sec,Mean_Time(ms),Non_2xx_Responses,Error_Rate(%),Meets_Error_Threshold
+entry_level,"16 cores, 16 threads, 125GB RAM, 3.9TB NVMe, QEMU Virtual CPU v2.5+",N/A,/account/balance,1,1235ms,1440ms,No,34,1.1,906.199ms,0,0.00%,Yes
+entry_level,"16 cores, 16 threads, 125GB RAM, 3.9TB NVMe, QEMU Virtual CPU v2.5+",N/A,/account/coins,1,1207ms,1251ms,No,34,1.12,894.603ms,0,0.00%,Yes
+entry_level,"16 cores, 16 threads, 125GB RAM, 3.9TB NVMe, QEMU Virtual CPU v2.5+",N/A,/account/balance,1,1422ms,1431ms,No,25,0.81,1237.097ms,0,0.00%,Yes
+entry_level,"16 cores, 16 threads, 125GB RAM, 3.9TB NVMe, QEMU Virtual CPU v2.5+",N/A,/account/coins,1,1401ms,1460ms,No,25,0.81,1236.284ms,0,0.00%,Yes
+entry_level,"16 cores, 16 threads, 125GB RAM, 3.9TB NVMe, QEMU Virtual CPU v2.5+",N/A,/account/balance,1,1535ms,1584ms,No,21,0.7,1430.701ms,0,0.00%,Yes
+entry_level,"16 cores, 16 threads, 125GB RAM, 3.9TB NVMe, QEMU Virtual CPU v2.5+",N/A,/account/coins,1,1784ms,1784ms,No,20,0.66,1509.528ms,0,0.00%,Yes
+entry_level,"16 cores, 16 threads, 125GB RAM, 3.9TB NVMe, QEMU Virtual CPU v2.5+",N/A,/account/balance,1,9251ms,9251ms,No,8,0.26,3882.457ms,0,0.00%,Yes
+entry_level,"16 cores, 16 threads, 125GB RAM, 3.9TB NVMe, QEMU Virtual CPU v2.5+",N/A,/account/coins,1,4332ms,4332ms,No,9,0.28,3611.623ms,0,0.00%,Yes
+entry_level,"16 cores, 16 threads, 125GB RAM, 3.9TB NVMe, QEMU Virtual CPU v2.5+",N/A,/account/balance,1,0ms,0ms,Yes,0,0.0,0.0ms,0,0.00%,Yes
+entry_level,"16 cores, 16 threads, 125GB RAM, 3.9TB NVMe, QEMU Virtual CPU v2.5+",N/A,/account/coins,1,0ms,0ms,Yes,0,0.0,0.0ms,0,0.00%,Yes

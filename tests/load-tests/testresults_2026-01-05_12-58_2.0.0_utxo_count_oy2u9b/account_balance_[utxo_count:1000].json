@@ -1,0 +1,9 @@
+{
+  "network_identifier": {
+    "blockchain": "cardano",
+    "network": "mainnet"
+  },
+  "account_identifier": {
+    "address": "addr1w9eu87z6ywets8talp9fv94kv6c7rjx9lnllv7pan39p53gkjg05e"
+  }
+}

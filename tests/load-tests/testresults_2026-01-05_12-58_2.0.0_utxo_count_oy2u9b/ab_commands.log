@@ -1,0 +1,33 @@
+AB Commands Log - 2026-01-05 12:58:43.659830
+================================================================================
+
+Endpoint: /account/balance [utxo_count:1], Concurrency: 1
+Command: ab -t 30 -c 1 -p /home/linconvidal/git/cardano-rosetta-java/tests/load-tests/testresults_2026-01-05_12-58_2.0.0_utxo_count_oy2u9b/account_balance_[utxo_count:1].json -T application/json http://localhost:8082/account/balance
+--------------------------------------------------------------------------------
+Endpoint: /account/coins [utxo_count:1], Concurrency: 1
+Command: ab -t 30 -c 1 -p /home/linconvidal/git/cardano-rosetta-java/tests/load-tests/testresults_2026-01-05_12-58_2.0.0_utxo_count_oy2u9b/account_coins_[utxo_count:1].json -T application/json http://localhost:8082/account/coins
+--------------------------------------------------------------------------------
+Endpoint: /account/balance [utxo_count:10], Concurrency: 1
+Command: ab -t 30 -c 1 -p /home/linconvidal/git/cardano-rosetta-java/tests/load-tests/testresults_2026-01-05_12-58_2.0.0_utxo_count_oy2u9b/account_balance_[utxo_count:10].json -T application/json http://localhost:8082/account/balance
+--------------------------------------------------------------------------------
+Endpoint: /account/coins [utxo_count:10], Concurrency: 1
+Command: ab -t 30 -c 1 -p /home/linconvidal/git/cardano-rosetta-java/tests/load-tests/testresults_2026-01-05_12-58_2.0.0_utxo_count_oy2u9b/account_coins_[utxo_count:10].json -T application/json http://localhost:8082/account/coins
+--------------------------------------------------------------------------------
+Endpoint: /account/balance [utxo_count:100], Concurrency: 1
+Command: ab -t 30 -c 1 -p /home/linconvidal/git/cardano-rosetta-java/tests/load-tests/testresults_2026-01-05_12-58_2.0.0_utxo_count_oy2u9b/account_balance_[utxo_count:100].json -T application/json http://localhost:8082/account/balance
+--------------------------------------------------------------------------------
+Endpoint: /account/coins [utxo_count:100], Concurrency: 1
+Command: ab -t 30 -c 1 -p /home/linconvidal/git/cardano-rosetta-java/tests/load-tests/testresults_2026-01-05_12-58_2.0.0_utxo_count_oy2u9b/account_coins_[utxo_count:100].json -T application/json http://localhost:8082/account/coins
+--------------------------------------------------------------------------------
+Endpoint: /account/balance [utxo_count:1000], Concurrency: 1
+Command: ab -t 30 -c 1 -p /home/linconvidal/git/cardano-rosetta-java/tests/load-tests/testresults_2026-01-05_12-58_2.0.0_utxo_count_oy2u9b/account_balance_[utxo_count:1000].json -T application/json http://localhost:8082/account/balance
+--------------------------------------------------------------------------------
+Endpoint: /account/coins [utxo_count:1000], Concurrency: 1
+Command: ab -t 30 -c 1 -p /home/linconvidal/git/cardano-rosetta-java/tests/load-tests/testresults_2026-01-05_12-58_2.0.0_utxo_count_oy2u9b/account_coins_[utxo_count:1000].json -T application/json http://localhost:8082/account/coins
+--------------------------------------------------------------------------------
+Endpoint: /account/balance [utxo_count:10000], Concurrency: 1
+Command: ab -t 30 -c 1 -p /home/linconvidal/git/cardano-rosetta-java/tests/load-tests/testresults_2026-01-05_12-58_2.0.0_utxo_count_oy2u9b/account_balance_[utxo_count:10000].json -T application/json http://localhost:8082/account/balance
+--------------------------------------------------------------------------------
+Endpoint: /account/coins [utxo_count:10000], Concurrency: 1
+Command: ab -t 30 -c 1 -p /home/linconvidal/git/cardano-rosetta-java/tests/load-tests/testresults_2026-01-05_12-58_2.0.0_utxo_count_oy2u9b/account_coins_[utxo_count:10000].json -T application/json http://localhost:8082/account/coins
+--------------------------------------------------------------------------------
