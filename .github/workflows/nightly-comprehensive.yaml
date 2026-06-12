@@ -1,0 +1,237 @@
+name: Nightly Comprehensive Tests
+
+on:
+  schedule:
+    # Run every night at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:  # Allow manual trigger
+
+permissions:
+  contents: read
+  issues: write  # For posting nightly test summary
+
+jobs:
+  nightly-tests:
+    runs-on: [self-hosted]
+    timeout-minutes: 360  # 6 hours max
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Update local repository
+        run: |
+          cd /home/integration/git/cardano-rosetta-java
+          git fetch origin
+          git checkout develop
+          git pull origin develop
+
+      - name: Stop current services
+        run: |
+          cd /home/integration/git/cardano-rosetta-java
+
+          docker compose \
+            --env-file .env.docker-compose-preprod \
+            --env-file .env.docker-compose-profile-mid-level \
+            -f docker-compose.yaml \
+            down
+
+      - name: Configure environment for pruning tests
+        run: |
+          cd /home/integration/git/cardano-rosetta-java
+          ensure_var() {
+            local key="$1"
+            local value="$2"
+            local file=".env.docker-compose-preprod"
+            if grep -q "^${key}=" "$file"; then
+              sed -i "s#^${key}=.*#${key}=${value}#" "$file"
+            else
+              echo "${key}=${value}" >> "$file"
+            fi
+          }
+
+          ensure_var REMOVE_SPENT_UTXOS true
+          ensure_var REMOVE_SPENT_UTXOS_LAST_BLOCKS_GRACE_COUNT 2160
+          ensure_var TOKEN_REGISTRY_ENABLED true
+          ensure_var TOKEN_REGISTRY_BASE_URL http://preview.integrations.cf-systems.internal:8080/api
+          ensure_var TOKEN_REGISTRY_CACHE_TTL_HOURS 1
+          ensure_var TOKEN_REGISTRY_LOGO_FETCH true
+          ensure_var TOKEN_REGISTRY_REQUEST_TIMEOUT_SECONDS 2
+
+      - name: Start services with test configuration
+        run: |
+          cd /home/integration/git/cardano-rosetta-java
+
+          docker compose \
+            --env-file .env.docker-compose-preprod \
+            --env-file .env.docker-compose-profile-mid-level \
+            -f docker-compose.yaml \
+            up -d
+
+      - name: Wait for sync and prepare tests
+        run: |
+          cd /home/integration/git/cardano-rosetta-java
+          for i in {1..60}; do
+            SYNC=$(curl -s -X POST http://localhost:8082/network/status -H 'Content-Type: application/json' -d '{"network_identifier": {"blockchain": "cardano", "network": "preprod"}}' | jq -r '.sync_status.synced // false')
+            [ "$SYNC" = "true" ] && break
+            sleep 10
+          done
+          if [ "$SYNC" != "true" ]; then
+            echo "API never reached sync; aborting nightly tests"
+            exit 1
+          fi
+          export PATH="$HOME/.local/bin:$PATH"
+          cd tests/data-endpoints
+          uv sync
+          cat ../../.env.docker-compose-preprod ../../.env.docker-compose-profile-mid-level > .env
+
+      - name: Run nightly data endpoint tests
+        id: nightly_tests
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          cd /home/integration/git/cardano-rosetta-java/tests/data-endpoints
+          uv run pytest -m nightly --alluredir=./allure-results --tb=short -v || NIGHTLY_RESULT=$?
+          echo "nightly_result=${NIGHTLY_RESULT:-0}" >> $GITHUB_OUTPUT
+          exit ${NIGHTLY_RESULT:-0}
+        env:
+          ROSETTA_URL: http://localhost:8082
+          CARDANO_NETWORK: preprod
+
+      - name: Run offline mode validation
+        id: offline_tests
+        continue-on-error: true
+        run: |
+          cd /home/integration/git/cardano-rosetta-java
+          docker compose --env-file .env.docker-compose-preprod --env-file .env.docker-compose-profile-mid-level -f docker-compose.yaml down
+          sed -i '/^API_SPRING_PROFILES_ACTIVE=/c\API_SPRING_PROFILES_ACTIVE=offline' .env.docker-compose-preprod
+          sed -i '/^SYNC=/c\SYNC=false' .env.docker-compose-preprod
+          docker compose --env-file .env.docker-compose-preprod --env-file .env.docker-compose-profile-mid-level -f docker-compose.yaml up -d
+          sleep 30
+          export PATH="$HOME/.local/bin:$PATH"
+          cd tests/integration
+          uv run pytest test_golden_examples.py --tb=short -v || OFFLINE_RESULT=$?
+          echo "offline_result=${OFFLINE_RESULT:-0}" >> $GITHUB_OUTPUT
+        env:
+          ROSETTA_URL: http://localhost:8082
+          CARDANO_NETWORK: preprod
+
+      - name: Run token registry validation
+        id: token_tests
+        run: |
+          cd /home/integration/git/cardano-rosetta-java
+          docker compose --env-file .env.docker-compose-preprod --env-file .env.docker-compose-profile-mid-level -f docker-compose.yaml down
+          sed -i '/^API_SPRING_PROFILES_ACTIVE=/d; /^SYNC=/c\SYNC=true' .env.docker-compose-preprod
+          docker compose --env-file .env.docker-compose-preprod --env-file .env.docker-compose-profile-mid-level -f docker-compose.yaml up -d
+          sleep 60
+          cat .env.docker-compose-preprod .env.docker-compose-profile-mid-level > tests/data-endpoints/.env
+          export PATH="$HOME/.local/bin:$PATH"
+          cd tests/data-endpoints
+          uv run pytest test_token_registry.py --tb=short -v || TOKEN_RESULT=$?
+          echo "token_result=${TOKEN_RESULT:-0}" >> $GITHUB_OUTPUT
+          exit ${TOKEN_RESULT:-0}
+        env:
+          ROSETTA_URL: http://localhost:8082
+          CARDANO_NETWORK: preprod
+
+      - name: Verify Node.js for Allure 3
+        if: always()
+        run: |
+          NODE_VER=$(node -p "process.versions.node.split('.')[0]" 2>/dev/null) || { echo "Node.js not found"; exit 1; }
+          [ "$NODE_VER" -ge 18 ] || { echo "Node.js >= 18 required, found v$NODE_VER"; exit 1; }
+
+      - name: Generate Allure report
+        if: always()
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          cd /home/integration/git/cardano-rosetta-java/tests/data-endpoints
+          rm -rf allure-report
+          npx --yes allure@3.1.0 generate ./allure-results --output allure-report || true
+
+      - name: Post nightly summary
+        if: always()
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const nr = '${{ steps.nightly_tests.outputs.nightly_result }}';
+            const or = '${{ steps.offline_tests.outputs.offline_result }}';
+            const tr = '${{ steps.token_tests.outputs.token_result }}';
+            const e = (r) => r === '0' ? '✅' : '❌';
+            let body = `## Nightly Test Results\n\n`;
+            body += `- ${e(nr)} Nightly: ${nr === '0' ? 'PASSED' : 'FAILED'}\n`;
+            body += `- ${e(or)} Offline: ${or === '0' ? 'PASSED' : 'FAILED'}\n`;
+            body += `- ${e(tr)} Tokens: ${tr === '0' ? 'PASSED' : 'FAILED'}\n`;
+            console.log(body);
+
+      - name: Reset environment for next PR run
+        if: always()
+        run: |
+          set -e
+          cd /home/integration/git/cardano-rosetta-java
+          docker compose --env-file .env.docker-compose-preprod --env-file .env.docker-compose-profile-mid-level -f docker-compose.yaml down
+          git restore .env.docker-compose-preprod
+
+          DB_PATH=$(grep '^DB_PATH=' .env.docker-compose-preprod | tail -n1 | cut -d'=' -f2-)
+
+          SUDO=""
+          if command -v sudo >/dev/null 2>&1; then
+            SUDO="sudo"
+          fi
+
+          if [ -n "$DB_PATH" ]; then
+            $SUDO rm -rf "$DB_PATH"
+            $SUDO mkdir -p "$DB_PATH"
+            if [ -n "$SUDO" ]; then
+              $SUDO chown -R $(id -u):$(id -g) "$DB_PATH"
+            else
+              chown -R $(id -u):$(id -g) "$DB_PATH"
+            fi
+          fi
+
+          ensure_var_file() {
+            local key="$1"
+            local value="$2"
+            local file=".env.docker-compose-preprod"
+            if grep -q "^${key}=" "$file"; then
+              sed -i "s#^${key}=.*#${key}=${value}#" "$file"
+            else
+              echo "${key}=${value}" >> "$file"
+            fi
+          }
+
+          ensure_var_file REMOVE_SPENT_UTXOS false
+          ensure_var_file REMOVE_SPENT_UTXOS_LAST_BLOCKS_GRACE_COUNT 129600
+          ensure_var_file TOKEN_REGISTRY_ENABLED true
+          ensure_var_file TOKEN_REGISTRY_BASE_URL http://preview.integrations.cf-systems.internal:8080/api
+          ensure_var_file TOKEN_REGISTRY_CACHE_TTL_HOURS 1
+          ensure_var_file TOKEN_REGISTRY_LOGO_FETCH true
+          ensure_var_file TOKEN_REGISTRY_REQUEST_TIMEOUT_SECONDS 2
+          ensure_var_file PEER_DISCOVERY true
+
+          docker compose --env-file .env.docker-compose-preprod --env-file .env.docker-compose-profile-mid-level -f docker-compose.yaml up -d
+
+          echo "Waiting for API to respond after nightly reset..."
+          for i in {1..60}; do
+            if curl -sf -X POST http://localhost:8082/network/list \
+              -H 'Content-Type: application/json' \
+              -d '{}' > /dev/null 2>&1; then
+              echo "API is responding"
+              break
+            fi
+            echo "Waiting for API to start... ($i/60)"
+            sleep 10
+          done
+
+          echo "Waiting for API to sync after nightly reset..."
+          while true; do
+            SYNC_STATUS=$(curl -s -X POST http://localhost:8082/network/status \
+              -H 'Content-Type: application/json' \
+              -d '{"network_identifier": {"blockchain": "cardano", "network": "preprod"}}' | \
+              jq -r '.sync_status.synced' 2>/dev/null || echo "false")
+
+            if [ "$SYNC_STATUS" = "true" ]; then
+              echo "✓ Environment ready for PR runs"
+              break
+            fi
+
+            echo "Waiting for sync... (synced=$SYNC_STATUS)"
+            sleep 10
+          done

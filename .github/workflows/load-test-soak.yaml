@@ -1,0 +1,122 @@
+name: Load Test - Soak
+
+on:
+  workflow_dispatch:
+    inputs:
+      users:
+        description: 'Number of concurrent users'
+        required: false
+        type: number
+        default: 50
+      duration:
+        description: 'Test duration (e.g., 30m, 1h, 4h)'
+        required: false
+        type: string
+        default: '30m'
+      network:
+        description: 'Network to test'
+        required: true
+        type: choice
+        options:
+          - preprod
+          - mainnet
+        default: 'preprod'
+      spawn_rate:
+        description: 'Users to spawn per second'
+        required: false
+        type: number
+        default: 5
+
+  schedule:
+    # Run nightly at 2 AM UTC
+    - cron: '0 2 * * *'
+
+jobs:
+  soak-test:
+    name: Soak Test (${{ inputs.duration || '1h' }} / ${{ inputs.network || 'preprod' }})
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 300
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: |
+          cd tests/load-tests
+          uv sync
+
+      - name: Run Soak Test
+        id: test
+        run: |
+          cd tests/load-tests
+
+          # Use inputs or defaults for scheduled runs
+          USERS="${{ inputs.users || 50 }}"
+          DURATION="${{ inputs.duration || '1h' }}"
+          NETWORK="${{ inputs.network || 'preprod' }}"
+          SPAWN_RATE="${{ inputs.spawn_rate || 5 }}"
+
+          uv run ./soak_test.py \
+            --url="${{ secrets.ROSETTA_API_URL || 'http://localhost:8082' }}" \
+            --users="$USERS" \
+            --duration="$DURATION" \
+            --network="$NETWORK" \
+            --spawn-rate="$SPAWN_RATE"
+
+          # Find the output directory
+          OUTPUT_DIR=$(ls -td testresults_* | head -1)
+          echo "output_dir=$OUTPUT_DIR" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Upload Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-test-results-${{ inputs.network || 'preprod' }}-${{ github.run_id }}
+          path: tests/load-tests/testresults_*/
+          retention-days: 30
+
+      - name: Post Summary
+        if: always()
+        run: |
+          cd tests/load-tests
+          OUTPUT_DIR=$(ls -td testresults_* | head -1)
+
+          if [ -f "$OUTPUT_DIR/summary_results.md" ]; then
+            echo "## Soak Test Results" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Users:** ${{ inputs.users || 50 }}" >> $GITHUB_STEP_SUMMARY
+            echo "**Duration:** ${{ inputs.duration || '1h' }}" >> $GITHUB_STEP_SUMMARY
+            echo "**Network:** ${{ inputs.network || 'preprod' }}" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            cat "$OUTPUT_DIR/summary_results.md" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ -f "$OUTPUT_DIR/report.html" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "See the HTML report in the uploaded artifacts." >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Check for Failures
+        if: always()
+        run: |
+          cd tests/load-tests
+          OUTPUT_DIR=$(ls -td testresults_* | head -1)
+
+          if [ -f "$OUTPUT_DIR/results_failures.csv" ]; then
+            FAILURES=$(wc -l < "$OUTPUT_DIR/results_failures.csv")
+            # Subtract 1 for header row
+            FAILURES=$((FAILURES - 1))
+
+            if [ "$FAILURES" -gt 0 ]; then
+              echo "::warning::Soak test had $FAILURES failure types"
+            fi
+          fi

@@ -1,0 +1,195 @@
+name: Weekly Sync Validation
+
+on:
+  schedule:
+    # Run every Sunday at 3 AM UTC
+    - cron: '0 3 * * 0'
+  workflow_dispatch:  # Allow manual trigger
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  mithril-bootstrap-test:
+    runs-on: [self-hosted]
+    timeout-minutes: 300  # 5 hours max for Mithril bootstrap
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Update local repository
+        run: |
+          cd /home/integration/git/cardano-rosetta-java
+          git fetch origin
+          git checkout develop
+          git pull origin develop
+
+      - name: Start Mithril sync
+        run: |
+          cd /home/integration/git/cardano-rosetta-java
+          docker compose --env-file .env.docker-compose-preprod --env-file .env.docker-compose-profile-mid-level -f docker-compose.yaml down
+
+          ensure_var() {
+            local key="$1"
+            local value="$2"
+            local file=".env.docker-compose-preprod"
+            if grep -q "^${key}=" "$file"; then
+              sed -i "s#^${key}=.*#${key}=${value}#" "$file"
+            else
+              echo "${key}=${value}" >> "$file"
+            fi
+          }
+
+          ensure_var REMOVE_SPENT_UTXOS false
+          ensure_var REMOVE_SPENT_UTXOS_LAST_BLOCKS_GRACE_COUNT 129600
+          ensure_var TOKEN_REGISTRY_ENABLED true
+          ensure_var TOKEN_REGISTRY_BASE_URL http://preview.integrations.cf-systems.internal:8080/api
+          ensure_var TOKEN_REGISTRY_CACHE_TTL_HOURS 1
+          ensure_var TOKEN_REGISTRY_LOGO_FETCH true
+          ensure_var TOKEN_REGISTRY_REQUEST_TIMEOUT_SECONDS 2
+          ensure_var PEER_DISCOVERY true
+          ensure_var MITHRIL_SYNC true
+
+          DB_PATH=$(grep '^DB_PATH=' .env.docker-compose-preprod | tail -n1 | cut -d'=' -f2-)
+          CARDANO_NODE_DIR=$(grep '^CARDANO_NODE_DIR=' .env.docker-compose-preprod | tail -n1 | cut -d'=' -f2-)
+          CARDANO_NODE_DB=$(grep '^CARDANO_NODE_DB=' .env.docker-compose-preprod | tail -n1 | cut -d'=' -f2-)
+
+          SUDO=""
+          if command -v sudo >/dev/null 2>&1; then
+            SUDO="sudo"
+          fi
+
+          for path in "$DB_PATH" "$CARDANO_NODE_DIR" "$CARDANO_NODE_DB"; do
+            if [ -n "$path" ]; then
+              $SUDO rm -rf "$path"
+              $SUDO mkdir -p "$path"
+              if [ -n "$SUDO" ]; then
+                $SUDO chown -R $(id -u):$(id -g) "$path"
+              else
+                chown -R $(id -u):$(id -g) "$path"
+              fi
+            fi
+          done
+
+          echo "MITHRIL_START_TIME=$(date +%s)" >> $GITHUB_ENV
+          docker compose --env-file .env.docker-compose-preprod --env-file .env.docker-compose-profile-mid-level -f docker-compose.yaml up -d
+
+      - name: Monitor and test Mithril sync
+        run: |
+          for i in {1..180}; do
+            sleep 60
+            SYNC=$(curl -s -X POST http://localhost:8082/network/status -H 'Content-Type: application/json' -d '{"network_identifier": {"blockchain": "cardano", "network": "preprod"}}' | jq -r '.sync_status.synced // false')
+            [ "$SYNC" = "true" ] && echo "MITHRIL_SYNC_TIME=$(( ($(date +%s) - ${{ env.MITHRIL_START_TIME }}) / 60 ))" >> $GITHUB_ENV && break
+            echo "[$((( $(date +%s) - ${{ env.MITHRIL_START_TIME }}) / 60 )) min] Waiting..."
+          done
+          [ "$SYNC" != "true" ] && exit 1
+          cd /home/integration/git/cardano-rosetta-java
+          cat .env.docker-compose-preprod .env.docker-compose-profile-mid-level > tests/data-endpoints/.env
+
+      - name: Test and record metrics
+        id: mithril_tests
+        if: always()
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          cd /home/integration/git/cardano-rosetta-java/tests/data-endpoints
+          uv sync
+          uv run pytest -m "pr or nightly" --tb=short -v || RESULT=$?
+          echo "mithril_test_result=${RESULT:-0}" >> $GITHUB_OUTPUT
+          echo "Mithril Sync Time: ${{ env.MITHRIL_SYNC_TIME }} minutes" >> $GITHUB_STEP_SUMMARY
+          exit ${RESULT:-0}
+        env:
+          ROSETTA_URL: http://localhost:8082
+          CARDANO_NETWORK: preprod
+
+  traditional-sync-test:
+    runs-on: [self-hosted]
+    timeout-minutes: 600  # 10 hours max for traditional sync
+    needs: mithril-bootstrap-test  # Run after Mithril test completes
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Start traditional sync
+        run: |
+          cd /home/integration/git/cardano-rosetta-java
+          docker compose --env-file .env.docker-compose-preprod --env-file .env.docker-compose-profile-mid-level -f docker-compose.yaml down
+
+          ensure_var() {
+            local key="$1"
+            local value="$2"
+            local file=".env.docker-compose-preprod"
+            if grep -q "^${key}=" "$file"; then
+              sed -i "s#^${key}=.*#${key}=${value}#" "$file"
+            else
+              echo "${key}=${value}" >> "$file"
+            fi
+          }
+
+          ensure_var REMOVE_SPENT_UTXOS false
+          ensure_var REMOVE_SPENT_UTXOS_LAST_BLOCKS_GRACE_COUNT 129600
+          ensure_var TOKEN_REGISTRY_ENABLED true
+          ensure_var TOKEN_REGISTRY_BASE_URL http://preview.integrations.cf-systems.internal:8080/api
+          ensure_var TOKEN_REGISTRY_CACHE_TTL_HOURS 1
+          ensure_var TOKEN_REGISTRY_LOGO_FETCH true
+          ensure_var TOKEN_REGISTRY_REQUEST_TIMEOUT_SECONDS 2
+          ensure_var PEER_DISCOVERY true
+          ensure_var MITHRIL_SYNC false
+
+          DB_PATH=$(grep '^DB_PATH=' .env.docker-compose-preprod | tail -n1 | cut -d'=' -f2-)
+          CARDANO_NODE_DIR=$(grep '^CARDANO_NODE_DIR=' .env.docker-compose-preprod | tail -n1 | cut -d'=' -f2-)
+          CARDANO_NODE_DB=$(grep '^CARDANO_NODE_DB=' .env.docker-compose-preprod | tail -n1 | cut -d'=' -f2-)
+
+          SUDO=""
+          if command -v sudo >/dev/null 2>&1; then
+            SUDO="sudo"
+          fi
+
+          for path in "$DB_PATH" "$CARDANO_NODE_DIR" "$CARDANO_NODE_DB"; do
+            if [ -n "$path" ]; then
+              $SUDO rm -rf "$path"
+              $SUDO mkdir -p "$path"
+              if [ -n "$SUDO" ]; then
+                $SUDO chown -R $(id -u):$(id -g) "$path"
+              else
+                chown -R $(id -u):$(id -g) "$path"
+              fi
+            fi
+          done
+
+          echo "TRADITIONAL_START_TIME=$(date +%s)" >> $GITHUB_ENV
+          docker compose --env-file .env.docker-compose-preprod --env-file .env.docker-compose-profile-mid-level -f docker-compose.yaml up -d
+
+      - name: Monitor and prepare traditional sync tests
+        run: |
+          for i in {1..420}; do
+            sleep 60
+            SYNC=$(curl -s -X POST http://localhost:8082/network/status -H 'Content-Type: application/json' -d '{"network_identifier": {"blockchain": "cardano", "network": "preprod"}}' | jq -r '.sync_status.synced // false')
+            ELAPSED=$(( ($(date +%s) - ${{ env.TRADITIONAL_START_TIME }}) / 60 ))
+            [ $(( ELAPSED % 10 )) -eq 0 ] && echo "[$ELAPSED min] Waiting..."
+            [ "$SYNC" = "true" ] && echo "TRADITIONAL_SYNC_TIME=$ELAPSED" >> $GITHUB_ENV && break
+          done
+          [ "$SYNC" != "true" ] && exit 1
+          cd /home/integration/git/cardano-rosetta-java
+          cat .env.docker-compose-preprod .env.docker-compose-profile-mid-level > tests/data-endpoints/.env
+
+      - name: Test and record comparison
+        id: traditional_tests
+        if: always()
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          cd /home/integration/git/cardano-rosetta-java/tests/data-endpoints
+          uv sync
+          uv run pytest -m "pr or nightly" --tb=short -v || RESULT=$?
+          echo "traditional_test_result=${RESULT:-0}" >> $GITHUB_OUTPUT
+          echo "## Sync Time Comparison" >> $GITHUB_STEP_SUMMARY
+          echo "- Mithril: ${{ env.MITHRIL_SYNC_TIME }} min" >> $GITHUB_STEP_SUMMARY
+          echo "- Traditional: ${{ env.TRADITIONAL_SYNC_TIME }} min" >> $GITHUB_STEP_SUMMARY
+          [ -n "${{ env.MITHRIL_SYNC_TIME }}" ] && [ -n "${{ env.TRADITIONAL_SYNC_TIME }}" ] && echo "- Speedup: $(( ${{ env.TRADITIONAL_SYNC_TIME }} / ${{ env.MITHRIL_SYNC_TIME }} ))x" >> $GITHUB_STEP_SUMMARY
+          cd /home/integration/git/cardano-rosetta-java
+          docker compose --env-file .env.docker-compose-preprod --env-file .env.docker-compose-profile-mid-level -f docker-compose.yaml down
+          git restore .env.docker-compose-preprod
+          exit ${RESULT:-0}
+        env:
+          ROSETTA_URL: http://localhost:8082
+          CARDANO_NETWORK: preprod

@@ -571,11 +571,21 @@ def cmd_lookup():
         table.add_row("DREP_KEY_HASH_ID", f"[red]Error: {e}[/]")
         table.add_row("DREP_SCRIPT_HASH_ID", f"[red]Error: {e}[/]")
 
-    # 3. Governance proposals — newest first, find an open one
+    # 3. Governance proposals — newest first, find an open one that accepts SPO votes
+    # SPOs can only vote on: parameter_change, hard_fork_initiation, info_action,
+    # no_confidence, update_committee. Treasury withdrawals and new_constitution
+    # are DRep-only and must be skipped for pool governance vote tests.
+    SPO_VOTABLE_TYPES = {
+        "parameter_change",
+        "hard_fork_initiation",
+        "info_action",
+        "no_confidence",
+        "update_committee",
+    }
     try:
         found_proposal = None
         checked = 0
-        with console.status("Searching for open proposals...") as status:
+        with console.status("Searching for open SPO-votable proposals...") as status:
             for page in range(1, 10):
                 proposals = blockfrost_get("governance/proposals", count=100, page=page, order="desc")
                 if not proposals:
@@ -586,15 +596,19 @@ def cmd_lookup():
                     cert_index = p.get("cert_index", 0)
                     status.update(f"Checking proposal {checked}...")
                     detail = blockfrost_get(f"governance/proposals/{tx_hash}/{cert_index}")
-                    if not any([detail.get("enacted_epoch"), detail.get("dropped_epoch"), detail.get("expired_epoch")]):
-                        found_proposal = f"{tx_hash}{int(cert_index):02d}"
-                        break
+                    if any([detail.get("enacted_epoch"), detail.get("dropped_epoch"), detail.get("expired_epoch")]):
+                        continue
+                    gov_type = detail.get("governance_type", "")
+                    if gov_type not in SPO_VOTABLE_TYPES:
+                        continue
+                    found_proposal = f"{tx_hash}{int(cert_index):02d}"
+                    break
                 if found_proposal:
                     break
         if found_proposal:
             table.add_row("POOL_GOVERNANCE_PROPOSAL_ID", found_proposal)
         else:
-            table.add_row("POOL_GOVERNANCE_PROPOSAL_ID", f"[red]No open proposals found (checked {checked})[/]")
+            table.add_row("POOL_GOVERNANCE_PROPOSAL_ID", f"[red]No open SPO-votable proposals found (checked {checked})[/]")
     except Exception as e:
         table.add_row("POOL_GOVERNANCE_PROPOSAL_ID", f"[red]Error: {e}[/]")
 

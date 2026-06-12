@@ -1,0 +1,110 @@
+name: Load Test - Capacity
+
+on:
+  workflow_dispatch:
+    inputs:
+      data_profile:
+        description: 'Data profile to test'
+        required: true
+        type: choice
+        options:
+          - light
+          - medium
+          - heavy
+        default: 'light'
+      network:
+        description: 'Network to test'
+        required: true
+        type: choice
+        options:
+          - preprod
+          - mainnet
+        default: 'preprod'
+      endpoints:
+        description: 'Endpoints to test (comma-separated, empty for all)'
+        required: false
+        type: string
+        default: ''
+      concurrency:
+        description: 'Concurrency levels (comma-separated)'
+        required: false
+        type: string
+        default: '1,2,4,8,16,32'
+      duration:
+        description: 'Duration per concurrency level (seconds)'
+        required: false
+        type: number
+        default: 30
+      sla:
+        description: 'SLA threshold (milliseconds)'
+        required: false
+        type: number
+        default: 1000
+
+jobs:
+  capacity-test:
+    name: Capacity Test (${{ inputs.data_profile }} / ${{ inputs.network }})
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apache2-utils
+
+      - name: Run Capacity Test
+        id: test
+        run: |
+          cd tests/load-tests
+
+          # Build command
+          CMD="./stability_test.py"
+          CMD="$CMD --url=${{ secrets.ROSETTA_API_URL || 'http://localhost:8082' }}"
+          CMD="$CMD --data-profile=${{ inputs.data_profile }}"
+          CMD="$CMD --network=${{ inputs.network }}"
+          CMD="$CMD --concurrency=${{ inputs.concurrency }}"
+          CMD="$CMD --duration=${{ inputs.duration }}"
+          CMD="$CMD --sla=${{ inputs.sla }}"
+
+          if [ -n "${{ inputs.endpoints }}" ]; then
+            CMD="$CMD --endpoints='${{ inputs.endpoints }}'"
+          fi
+
+          echo "Running: $CMD"
+          eval $CMD
+
+          # Find the output directory
+          OUTPUT_DIR=$(ls -td testresults_* | head -1)
+          echo "output_dir=$OUTPUT_DIR" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Upload Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: capacity-test-results-${{ inputs.data_profile }}-${{ inputs.network }}
+          path: tests/load-tests/testresults_*/
+          retention-days: 30
+
+      - name: Post Summary
+        if: always()
+        run: |
+          cd tests/load-tests
+          OUTPUT_DIR=$(ls -td testresults_* | head -1)
+
+          if [ -f "$OUTPUT_DIR/summary_results.md" ]; then
+            echo "## Capacity Test Results" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Profile:** ${{ inputs.data_profile }}" >> $GITHUB_STEP_SUMMARY
+            echo "**Network:** ${{ inputs.network }}" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            cat "$OUTPUT_DIR/summary_results.md" >> $GITHUB_STEP_SUMMARY
+          fi
