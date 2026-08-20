@@ -1,0 +1,632 @@
+name: Release verification - Mainnet Docker Compose
+
+on:
+  workflow_call:
+    inputs:
+      prerelease_tag:
+        required: true
+        type: string
+      stable_tag:
+        required: true
+        type: string
+      run_upgrade:
+        required: true
+        type: boolean
+      clean_resync:
+        required: true
+        type: boolean
+      source_sha:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+
+env:
+  COMPOSE_ENV_FILE: /home/integration/.config/cardano-rosetta-java/mainnet-compose.env
+  DEPLOY_DIR: /home/integration/release-tests/cardano-rosetta-java
+  EXPECTED_HOST: zur2-s-d-115.colo2.cf-systems.internal
+  PROJECT_NAME: cardano-rosetta-java
+
+  # Compose settings for this run. The environment outranks every --env-file,
+  # so the committed defaults are read as-is and never rewritten.
+  CARDANO_NODE_DIR: /opt/cardano-rosetta-java/mainnet/node_data
+  DB_PATH: /opt/cardano-rosetta-java/mainnet/sql_data
+  NETWORK: mainnet
+  RELEASE_VERSION: ${{ inputs.prerelease_tag }}
+  REMOVE_SPENT_UTXOS: "false"
+  REMOVE_SPENT_UTXOS_LAST_BLOCKS_GRACE_COUNT: "129600"
+  TOKEN_REGISTRY_BASE_URL: ""
+  TOKEN_REGISTRY_ENABLED: "false"
+  TOKEN_REGISTRY_LOGO_FETCH: "false"
+
+jobs:
+  preflight:
+    runs-on: [self-hosted, release-mainnet-compose]
+    timeout-minutes: 180
+    outputs:
+      machine_specs: ${{ steps.machine.outputs.machine_specs }}
+    steps:
+      - name: Check out workflow support files
+        uses: actions/checkout@v4
+
+      - name: Validate Compose runner and protected configuration
+        run: |
+          set -euo pipefail
+
+          for command in curl docker find git jq lscpu python3 realpath stat sudo; do
+            command -v "$command"
+          done
+          docker compose version
+          sudo -n true
+
+          if [[ "$(hostname -f)" != "$EXPECTED_HOST" ]]; then
+            echo "Expected runner host $EXPECTED_HOST, found $(hostname -f)."
+            exit 1
+          fi
+          test -d "$DEPLOY_DIR/.git"
+          test -f "$COMPOSE_ENV_FILE"
+          mode=$(stat -c '%a' "$COMPOSE_ENV_FILE")
+          if [[ "$mode" != "600" && "$mode" != "400" ]]; then
+            echo "$COMPOSE_ENV_FILE must have mode 600 or 400, found $mode."
+            exit 1
+          fi
+          if ! grep -q '^DB_SECRET=.' "$COMPOSE_ENV_FILE"; then
+            echo "Missing DB_SECRET in $COMPOSE_ENV_FILE."
+            exit 1
+          fi
+
+      - name: Validate Compose service ownership
+        run: |
+          set -euo pipefail
+          for service in api yaci-indexer db cardano-node; do
+            mapfile -t containers < <(docker ps \
+              --filter "label=com.docker.compose.project=${PROJECT_NAME}" \
+              --filter "label=com.docker.compose.service=${service}" \
+              --format '{{.ID}}')
+            if (( ${#containers[@]} != 1 )); then
+              echo "Expected one running $service container for $PROJECT_NAME, found ${#containers[@]}."
+              exit 1
+            fi
+          done
+
+      - name: Validate Compose database access
+        run: |
+          set -euo pipefail
+          db_secret=$(awk -F= '$1 == "DB_SECRET" {print substr($0, index($0, "=") + 1)}' "$COMPOSE_ENV_FILE")
+          db_container=$(docker ps \
+            --filter "label=com.docker.compose.project=${PROJECT_NAME}" \
+            --filter 'label=com.docker.compose.service=db' \
+            --format '{{.ID}}')
+          docker exec \
+            --env PGPASSWORD="$db_secret" \
+            "$db_container" \
+            psql --username rosetta_db_admin --dbname rosetta-java \
+            --command 'SELECT 1;'
+
+      - name: Validate Compose workload and mount contract
+        run: |
+          set -euo pipefail
+          for service in api yaci-indexer; do
+            container=$(docker ps \
+              --filter "label=com.docker.compose.project=${PROJECT_NAME}" \
+              --filter "label=com.docker.compose.service=${service}" \
+              --format '{{.ID}}')
+            history=$(docker inspect "$container" | jq -r \
+              '.[0].Config.Env[] | select(startswith("REMOVE_SPENT_UTXOS=")) | sub("^REMOVE_SPENT_UTXOS="; "")')
+            if [[ "$history" != "false" ]]; then
+              echo "Compose release baseline must use full-history mode."
+              exit 1
+            fi
+          done
+
+          # Plain command substitution, so a Docker failure aborts the step
+          # instead of leaving an empty list that skips this guard.
+          containers=$(docker ps --all --quiet)
+          for container in $containers; do
+            mounts=$(docker inspect "$container" \
+              --format '{{range .Mounts}}{{println .Source}}{{end}}')
+            while IFS= read -r mount; do
+              [[ -n "$mount" ]] || continue
+              for data_path in "$DB_PATH" "$CARDANO_NODE_DIR"; do
+                # Matches the path itself, any parent of it, and anything nested
+                # inside it, so a differently shaped mount cannot slip through.
+                if [[ "$mount" != "$data_path" &&
+                      "$data_path" != "$mount"/* &&
+                      "$mount" != "$data_path"/* ]]; then
+                  continue
+                fi
+                project=$(docker inspect "$container" | jq -r \
+                  '.[0].Config.Labels["com.docker.compose.project"] // ""')
+                if [[ "$project" != "$PROJECT_NAME" ]]; then
+                  name=$(docker inspect "$container" --format '{{.Name}}')
+                  echo "Data path $mount belongs to foreign container $name."
+                  exit 1
+                fi
+              done
+            done <<<"$mounts"
+          done
+
+      - name: Validate stable Compose API and images
+        env:
+          RUN_UPGRADE: ${{ inputs.run_upgrade }}
+          STABLE_TAG: ${{ inputs.stable_tag }}
+        run: |
+          set -euo pipefail
+          status=$(curl -fsS \
+            --header 'Content-Type: application/json' \
+            --data '{"network_identifier":{"blockchain":"cardano","network":"mainnet"}}' \
+            http://127.0.0.1:8082/network/status)
+          synced=$(jq -r '.sync_status.synced // false' <<<"$status")
+          stage=$(jq -r '.sync_status.stage // "unavailable"' <<<"$status")
+          if [[ "$synced" != "true" || "$stage" != "LIVE" ]]; then
+            echo "Compose baseline must be LIVE: synced=$synced stage=$stage"
+            exit 1
+          fi
+
+          if [[ "$RUN_UPGRADE" == "true" ]]; then
+            api_container=$(docker ps \
+              --filter "label=com.docker.compose.project=${PROJECT_NAME}" \
+              --filter 'label=com.docker.compose.service=api' \
+              --format '{{.ID}}')
+            indexer_container=$(docker ps \
+              --filter "label=com.docker.compose.project=${PROJECT_NAME}" \
+              --filter 'label=com.docker.compose.service=yaci-indexer' \
+              --format '{{.ID}}')
+            api_image=$(docker inspect "$api_container" --format '{{.Config.Image}}')
+            indexer_image=$(docker inspect "$indexer_container" --format '{{.Config.Image}}')
+            if [[ "$api_image" != "cardanofoundation/cardano-rosetta-java-api:${STABLE_TAG}" ||
+                  "$indexer_image" != "cardanofoundation/cardano-rosetta-java-indexer:${STABLE_TAG}" ]]; then
+              echo "Compose baseline images are not the exact stable artifacts."
+              echo "api=$api_image indexer=$indexer_image"
+              exit 1
+            fi
+
+            options=$(curl -fsS \
+              --header 'Content-Type: application/json' \
+              --data '{"network_identifier":{"blockchain":"cardano","network":"mainnet"}}' \
+              http://127.0.0.1:8082/network/options)
+            version=$(jq -r '.version.middleware_version' <<<"$options")
+            if [[ "$version" != "$STABLE_TAG" ]]; then
+              echo "Expected stable middleware $STABLE_TAG, found $version."
+              exit 1
+            fi
+          fi
+
+      - name: Verify release source
+        env:
+          PRERELEASE_TAG: ${{ inputs.prerelease_tag }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          SOURCE_TAG="${PRERELEASE_TAG%-pre-release}"
+          origin_url=$(git -C "$DEPLOY_DIR" remote get-url origin)
+          if [[ "$origin_url" != "https://github.com/cardano-foundation/cardano-rosetta-java.git" &&
+                "$origin_url" != "git@github.com:cardano-foundation/cardano-rosetta-java.git" ]]; then
+            echo "Unexpected deployment clone origin: $origin_url"
+            exit 1
+          fi
+
+          git -C "$DEPLOY_DIR" fetch --tags --prune origin
+          resolved_sha=$(git -C "$DEPLOY_DIR" rev-parse "${SOURCE_TAG}^{commit}")
+          if [[ "$resolved_sha" != "$SOURCE_SHA" ]]; then
+            echo "Release source mismatch: expected $SOURCE_SHA, found $resolved_sha."
+            exit 1
+          fi
+          git -C "$DEPLOY_DIR" checkout --detach --force "$SOURCE_SHA"
+          git -C "$DEPLOY_DIR" reset --hard "$SOURCE_SHA"
+
+      - name: Validate candidate Compose configuration
+        run: |
+          set -euo pipefail
+          cd "$DEPLOY_DIR"
+
+          compose=(
+            docker compose
+            --project-name "$PROJECT_NAME"
+            --env-file .env.docker-compose
+            --env-file .env.docker-compose-profile-mid-level
+            --env-file "$COMPOSE_ENV_FILE"
+            --file docker-compose.yaml
+          )
+          "${compose[@]}" config --quiet
+
+      - name: Prefetch candidate Compose images and validate cleanup space
+        run: |
+          set -euo pipefail
+          cd "$DEPLOY_DIR"
+          compose=(
+            docker compose
+            --project-name "$PROJECT_NAME"
+            --env-file .env.docker-compose
+            --env-file .env.docker-compose-profile-mid-level
+            --env-file "$COMPOSE_ENV_FILE"
+            --file docker-compose.yaml
+          )
+          "${compose[@]}" pull
+
+          db_path=/opt/cardano-rosetta-java/mainnet/sql_data
+          node_path=/opt/cardano-rosetta-java/mainnet/node_data
+          db_device=$(df --output=source "$db_path" | awk 'NR == 2 {print $1}')
+          node_device=$(df --output=source "$node_path" | awk 'NR == 2 {print $1}')
+          if [[ "$db_device" != "$node_device" ]]; then
+            echo "Compose data paths must use the same filesystem."
+            exit 1
+          fi
+          free_bytes=$(df --output=avail -B1 "$db_path" | awk 'NR == 2 {print $1}')
+          # du exits non-zero when a file vanishes mid-traversal on a live
+          # deployment, yet still prints a usable total.
+          db_output=$(sudo du -sB1 "$db_path") || true
+          node_output=$(sudo du -sB1 "$node_path") || true
+          db_bytes=$(awk '{print $1}' <<<"$db_output")
+          node_bytes=$(awk '{print $1}' <<<"$node_output")
+          for measured in "$db_bytes" "$node_bytes"; do
+            if [[ ! "$measured" =~ ^[0-9]+$ ]]; then
+              echo "Could not measure the Compose data paths."
+              exit 1
+            fi
+          done
+          required_bytes=$((1100 * 1024 * 1024 * 1024))
+          projected_bytes=$((free_bytes + db_bytes + node_bytes))
+          if (( projected_bytes < required_bytes )); then
+            echo "Projected free space after Compose cleanup is below 1100GiB."
+            exit 1
+          fi
+          echo "Candidate Compose images are cached and projected disk is sufficient."
+
+      - name: Validate published Compose baseline
+        env:
+          STABLE_TAG: ${{ inputs.stable_tag }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/compare_release_performance.py \
+            --baseline-doc "$DEPLOY_DIR/docs/docs/development/test-results/${STABLE_TAG}/mid_profile/docker-compose.md" \
+            --stable-tag "$STABLE_TAG" \
+            --allow-missing-baseline \
+            --check-baseline-only
+
+      - name: Capture runner configuration
+        id: machine
+        run: |
+          set -euo pipefail
+          cpu_model=$(lscpu --json | jq -r '.lscpu[] | select(.field == "Model name:") | .data')
+          cores_per_socket=$(lscpu --json | jq -r '.lscpu[] | select(.field == "Core(s) per socket:") | .data')
+          sockets=$(lscpu --json | jq -r '.lscpu[] | select(.field == "Socket(s):") | .data')
+          physical_cores=$((cores_per_socket * sockets))
+          threads=$(nproc)
+          while read -r key value _; do
+            if [[ "$key" == "MemTotal:" ]]; then
+              visible_ram_gib=$(((value + 524288) / 1048576))
+              break
+            fi
+          done < /proc/meminfo
+          mapfile -t disk_stats < <(df -BG --output=size,avail /opt/cardano-rosetta-java/mainnet)
+          read -r disk_total_gib disk_free_gib <<< "${disk_stats[1]}"
+          disk_total_gib=${disk_total_gib%G}
+          disk_free_gib=${disk_free_gib%G}
+          compose_version=$(docker compose version --short)
+          machine_specs="${threads} vCPUs, ${visible_ram_gib}GB RAM; CPU=${cpu_model}; cores=${physical_cores}; threads=${threads}; visible RAM=${visible_ram_gib}GiB; disk=${disk_total_gib}GiB; free=${disk_free_gib}GiB; environment=Docker Compose ${compose_version}; kernel=$(uname -sr)"
+          echo "machine_specs=$machine_specs" >> "$GITHUB_OUTPUT"
+          printf "### Mainnet Compose runner\n\n%s\n" "$machine_specs" >> "$GITHUB_STEP_SUMMARY"
+
+  upgrade:
+    if: ${{ inputs.run_upgrade }}
+    needs: preflight
+    runs-on: [self-hosted, release-mainnet-compose]
+    timeout-minutes: 1440
+    steps:
+      - name: Upgrade Docker Compose to pre-release
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          current_sha=$(git -C "$DEPLOY_DIR" rev-parse HEAD)
+          if [[ "$current_sha" != "$SOURCE_SHA" ]]; then
+            echo "Deployment clone drifted after preflight."
+            exit 1
+          fi
+
+          cd "$DEPLOY_DIR"
+          compose=(
+            docker compose
+            --project-name "$PROJECT_NAME"
+            --env-file .env.docker-compose
+            --env-file .env.docker-compose-profile-mid-level
+            --env-file "$COMPOSE_ENV_FILE"
+            --file docker-compose.yaml
+          )
+          "${compose[@]}" up -d
+
+      - name: Wait for upgraded Compose deployment to reach LIVE
+        env:
+          PRERELEASE_TAG: ${{ inputs.prerelease_tag }}
+        run: |
+          set -euo pipefail
+          endpoint=http://127.0.0.1:8082
+
+          payload='{"network_identifier":{"blockchain":"cardano","network":"mainnet"}}'
+          deadline=$((SECONDS + 72000))
+          attempt=0
+
+          until curl -fs --header 'Content-Type: application/json' --data "$payload" \
+                  "$endpoint/network/status" \
+                | jq -e '.sync_status.synced and .sync_status.stage == "LIVE"' > /dev/null; do
+            (( SECONDS < deadline )) || { echo "Upgraded Compose deployment did not reach LIVE in time."; exit 1; }
+            (( ++attempt % 20 )) || echo "Upgraded Compose deployment: still waiting after $((SECONDS / 60))m."
+            sleep 60
+          done
+
+          version=$(curl -fsS --header 'Content-Type: application/json' --data "$payload" \
+            "$endpoint/network/options" | jq -r '.version.middleware_version')
+          if [[ "$version" != "${PRERELEASE_TAG%-pre-release}" ]]; then
+            echo "Upgraded Compose deployment reports middleware $version, expected ${PRERELEASE_TAG%-pre-release}."
+            exit 1
+          fi
+          echo "Upgraded Compose deployment is LIVE on $version."
+
+          for service in api yaci-indexer; do
+            image=$(docker ps \
+              --filter "label=com.docker.compose.project=${PROJECT_NAME}" \
+              --filter "label=com.docker.compose.service=${service}" \
+              --format '{{.Image}}')
+            if [[ "$image" != *":${PRERELEASE_TAG}" ]]; then
+              echo "Expected $service on ${PRERELEASE_TAG}, found ${image:-none}."
+              exit 1
+            fi
+          done
+
+  clean-resync:
+    if: ${{ inputs.clean_resync && !cancelled() && needs.preflight.result == 'success' && (needs.upgrade.result == 'success' || needs.upgrade.result == 'failure' || needs.upgrade.result == 'skipped') }}
+    needs:
+      - preflight
+      - upgrade
+    runs-on: [self-hosted, release-mainnet-compose]
+    timeout-minutes: 5760
+    steps:
+      - name: Delete the verified Compose release data
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$(hostname -f)" != "$EXPECTED_HOST" ]]; then
+            echo "Runner host changed after preflight."
+            exit 1
+          fi
+          current_sha=$(git -C "$DEPLOY_DIR" rev-parse HEAD)
+          if [[ "$current_sha" != "$SOURCE_SHA" ]]; then
+            echo "Deployment clone drifted after preflight."
+            exit 1
+          fi
+
+          cd "$DEPLOY_DIR"
+          compose=(
+            docker compose
+            --project-name "$PROJECT_NAME"
+            --env-file .env.docker-compose
+            --env-file .env.docker-compose-profile-mid-level
+            --env-file "$COMPOSE_ENV_FILE"
+            --file docker-compose.yaml
+          )
+          "${compose[@]}" down --remove-orphans
+
+          # Plain command substitution, so a Docker failure aborts the step
+          # instead of leaving an empty list that skips this guard.
+          containers=$(docker ps --all --quiet)
+          for container in $containers; do
+            mounts=$(docker inspect "$container" \
+              --format '{{range .Mounts}}{{println .Source}}{{end}}')
+            while IFS= read -r mount; do
+              [[ -n "$mount" ]] || continue
+              for data_path in "$DB_PATH" "$CARDANO_NODE_DIR"; do
+                # Matches the path itself, any parent of it, and anything nested
+                # inside it, so a differently shaped mount cannot slip through.
+                if [[ "$mount" == "$data_path" ||
+                      "$data_path" == "$mount"/* ||
+                      "$mount" == "$data_path"/* ]]; then
+                  name=$(docker inspect "$container" --format '{{.Name}}')
+                  echo "Refusing to delete $data_path, still referenced by $name."
+                  exit 1
+                fi
+              done
+            done <<<"$mounts"
+          done
+
+          db_path="$DB_PATH"
+          node_path="$CARDANO_NODE_DIR"
+          if [[ "$db_path" != "/opt/cardano-rosetta-java/mainnet/sql_data" ||
+                "$node_path" != "/opt/cardano-rosetta-java/mainnet/node_data" ]]; then
+            echo "Refusing to delete unexpected data paths: db=$db_path node=$node_path"
+            exit 1
+          fi
+
+          cleanup_root=/opt/cardano-rosetta-java/mainnet
+          if [[ "$(realpath -e "$cleanup_root")" != "$cleanup_root" || -L "$cleanup_root" ]]; then
+            echo "Refusing cleanup through a non-canonical root: $cleanup_root"
+            exit 1
+          fi
+
+          root_device=$(stat -c '%d' "$cleanup_root")
+          for data_path in "$db_path" "$node_path"; do
+            if [[ ! -d "$data_path" || -L "$data_path" ]]; then
+              echo "Refusing cleanup of a missing, non-directory, or symlinked path: $data_path"
+              exit 1
+            fi
+            if [[ "$(realpath -e "$data_path")" != "$data_path" ]]; then
+              echo "Refusing cleanup of a non-canonical data path: $data_path"
+              exit 1
+            fi
+            if [[ "$(stat -c '%d' "$data_path")" != "$root_device" ]]; then
+              echo "Refusing cleanup across a different filesystem: $data_path"
+              exit 1
+            fi
+          done
+
+          cd "$cleanup_root"
+          sudo find ./sql_data ./node_data -xdev -mindepth 1 -delete
+          free_gb=$(df --output=avail -BG "$cleanup_root" | awk 'NR == 2 {gsub(/G/, ""); print $1}')
+          if (( free_gb < 1100 )); then
+            echo "Compose cleanup did not recover the projected disk space: ${free_gb}GiB."
+            exit 1
+          fi
+          echo "Compose data cleanup completed with ${free_gb}GiB available."
+
+      - name: Start clean Compose pre-release deployment
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          current_sha=$(git -C "$DEPLOY_DIR" rev-parse HEAD)
+          if [[ "$current_sha" != "$SOURCE_SHA" ]]; then
+            echo "Deployment clone drifted after preflight."
+            exit 1
+          fi
+
+          cd "$DEPLOY_DIR"
+          compose=(
+            docker compose
+            --project-name "$PROJECT_NAME"
+            --env-file .env.docker-compose
+            --env-file .env.docker-compose-profile-mid-level
+            --env-file "$COMPOSE_ENV_FILE"
+            --file docker-compose.yaml
+          )
+          "${compose[@]}" up -d
+
+      - name: Wait for clean Compose resync to reach LIVE
+        env:
+          PRERELEASE_TAG: ${{ inputs.prerelease_tag }}
+        run: |
+          set -euo pipefail
+          endpoint=http://127.0.0.1:8082
+
+          payload='{"network_identifier":{"blockchain":"cardano","network":"mainnet"}}'
+          deadline=$((SECONDS + 259200))
+          attempt=0
+
+          until curl -fs --header 'Content-Type: application/json' --data "$payload" \
+                  "$endpoint/network/status" \
+                | jq -e '.sync_status.synced and .sync_status.stage == "LIVE"' > /dev/null; do
+            (( SECONDS < deadline )) || { echo "Clean Compose resync did not reach LIVE in time."; exit 1; }
+            (( ++attempt % 20 )) || echo "Clean Compose resync: still waiting after $((SECONDS / 60))m."
+            sleep 60
+          done
+
+          version=$(curl -fsS --header 'Content-Type: application/json' --data "$payload" \
+            "$endpoint/network/options" | jq -r '.version.middleware_version')
+          if [[ "$version" != "${PRERELEASE_TAG%-pre-release}" ]]; then
+            echo "Clean Compose resync reports middleware $version, expected ${PRERELEASE_TAG%-pre-release}."
+            exit 1
+          fi
+          echo "Clean Compose resync is LIVE on $version."
+
+          for service in api yaci-indexer; do
+            image=$(docker ps \
+              --filter "label=com.docker.compose.project=${PROJECT_NAME}" \
+              --filter "label=com.docker.compose.service=${service}" \
+              --format '{{.Image}}')
+            if [[ "$image" != *":${PRERELEASE_TAG}" ]]; then
+              echo "Expected $service on ${PRERELEASE_TAG}, found ${image:-none}."
+              exit 1
+            fi
+          done
+
+  performance:
+    if: ${{ needs.clean-resync.result == 'success' }}
+    needs:
+      - preflight
+      - clean-resync
+    runs-on: [self-hosted, release-mainnet-compose]
+    timeout-minutes: 720
+    steps:
+      - name: Check out workflow support files
+        uses: actions/checkout@v4
+
+      - name: Run legacy stability test against Docker Compose
+        id: stability
+        env:
+          MACHINE_SPECS: ${{ needs.preflight.outputs.machine_specs }}
+          PRERELEASE_TAG: ${{ inputs.prerelease_tag }}
+        run: |
+          set -euo pipefail
+          for command in ab curl docker jq python3; do
+            command -v "$command"
+          done
+
+          tests_dir="$DEPLOY_DIR/tests/legacy-load-tests"
+          machine_specs="$MACHINE_SPECS"
+          run_log="$tests_dir/release-test-${GITHUB_RUN_ID}.log"
+
+          cd "$tests_dir"
+          set +e
+          python3 stability_test.py \
+            --url=http://127.0.0.1:8082 \
+            --csv=data/mainnet-data.csv \
+            --network=mainnet \
+            --release="$PRERELEASE_TAG" \
+            --hardware-profile=mid_profile \
+            --machine-specs="$machine_specs" \
+            --duration=60 \
+            --cooldown=60 \
+            --sla=1000 \
+            --error-threshold=1.0 | tee "$run_log"
+          test_status=${PIPESTATUS[0]}
+          set -e
+
+          result_dir=$(python3 - "$run_log" <<'PY'
+          import pathlib
+          import sys
+
+          for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
+              prefix = "Creating output directory: "
+              if line.startswith(prefix):
+                  print(line.removeprefix(prefix))
+                  break
+          PY
+          )
+          if [[ -z "$result_dir" ]]; then
+            echo "Could not determine stability_test.py output directory."
+            # Publish the run log anyway, so the always() upload has a real path
+            # and the failure stays diagnosable.
+            result_dir="$PWD/failed-run-$GITHUB_RUN_ID"
+            mkdir -p "$result_dir"
+            mv "$run_log" "$result_dir/github-actions.log"
+            echo "result_dir=$result_dir" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          mv "$run_log" "$result_dir/github-actions.log"
+          echo "result_dir=$result_dir" >> "$GITHUB_OUTPUT"
+
+          if (( test_status != 0 )); then
+            exit "$test_status"
+          fi
+          test -f "$result_dir/summary_results.csv"
+
+      - name: Compare with the previous stable Compose result
+        env:
+          PRERELEASE_TAG: ${{ inputs.prerelease_tag }}
+          RESULT_DIR: ${{ steps.stability.outputs.result_dir }}
+          STABLE_TAG: ${{ inputs.stable_tag }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/compare_release_performance.py \
+            --baseline-doc "$DEPLOY_DIR/docs/docs/development/test-results/${STABLE_TAG}/mid_profile/docker-compose.md" \
+            --stable-tag "$STABLE_TAG" \
+            --candidate-dir "$RESULT_DIR" \
+            --candidate-tag "$PRERELEASE_TAG" \
+            --deployment "Mainnet Docker Compose" \
+            --documentation-name docker-compose.md \
+            --expected-hardware-profile mid_profile \
+            --allow-missing-baseline
+          cat "$RESULT_DIR/performance-comparison.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Compose performance evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: mainnet-compose-performance-${{ inputs.prerelease_tag }}
+          path: ${{ steps.stability.outputs.result_dir }}
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30

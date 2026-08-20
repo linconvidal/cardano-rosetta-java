@@ -14,7 +14,10 @@ permissions:
 
 jobs:
   test-on-preprod:
-    runs-on: [self-hosted]
+    runs-on: [self-hosted, preview-server-colo2]
+    concurrency:
+      group: preprod-host-deployment
+      cancel-in-progress: false
     timeout-minutes: 60
 
     steps:

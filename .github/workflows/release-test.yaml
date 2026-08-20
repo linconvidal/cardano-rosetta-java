@@ -1,0 +1,175 @@
+name: Release verification
+run-name: Verify ${{ inputs.prerelease_tag }} against ${{ inputs.stable_tag }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      prerelease_tag:
+        description: Pre-release Docker image tag, for example 2.4.0-pre-release
+        required: true
+        type: string
+      stable_tag:
+        description: Previous stable Docker image tag, for example 2.3.0
+        required: true
+        type: string
+      run_upgrade:
+        description: Test the in-place upgrade on the existing mainnet data
+        required: true
+        default: true
+        type: boolean
+      clean_resync:
+        description: Wipe mainnet data and resync from scratch, required for the performance numbers
+        required: true
+        default: false
+        type: boolean
+      scope:
+        description: Which environments to verify
+        required: true
+        default: preprod
+        type: choice
+        options:
+          - preprod
+          - mainnet
+          - all
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-verification
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      source_sha: ${{ steps.source.outputs.source_sha }}
+    steps:
+      - name: Validate release inputs
+        id: metadata
+        env:
+          PRERELEASE_TAG: ${{ inputs.prerelease_tag }}
+          RUN_UPGRADE: ${{ inputs.run_upgrade }}
+          STABLE_TAG: ${{ inputs.stable_tag }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$PRERELEASE_TAG" != *-pre-release ]]; then
+            echo "prerelease_tag must end with -pre-release."
+            exit 1
+          fi
+
+          SOURCE_TAG="${PRERELEASE_TAG%-pre-release}"
+          if [[ -z "$SOURCE_TAG" || "$SOURCE_TAG" == "$STABLE_TAG" ]]; then
+            echo "Candidate and stable versions must be different."
+            exit 1
+          fi
+
+          echo "source_tag=$SOURCE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the official release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.metadata.outputs.source_tag }}
+
+      - name: Resolve immutable release source
+        id: source
+        run: echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Verify the release version contract
+        env:
+          PRERELEASE_TAG: ${{ inputs.prerelease_tag }}
+        run: |
+          set -euo pipefail
+          source_tag="${PRERELEASE_TAG%-pre-release}"
+          revision=$(sed -n 's:.*<revision>\(.*\)</revision>.*:\1:p' pom.xml | head -1)
+          if [[ "$revision" != "$source_tag" ]]; then
+            echo "pom.xml <revision> is '$revision' but the release tag is '$source_tag'."
+            echo "Every deployment would report the wrong middleware_version and"
+            echo "fail hours into the run, after the destructive resync started."
+            exit 1
+          fi
+          echo "Release version contract holds: pom <revision> = $revision."
+
+      - name: Validate published images
+        env:
+          PRERELEASE_TAG: ${{ inputs.prerelease_tag }}
+          RUN_UPGRADE: ${{ inputs.run_upgrade }}
+          STABLE_TAG: ${{ inputs.stable_tag }}
+        run: |
+          set -euo pipefail
+
+          for component in api indexer; do
+            docker buildx imagetools inspect \
+              "cardanofoundation/cardano-rosetta-java-${component}:${PRERELEASE_TAG}"
+          done
+
+          # Checked unconditionally, not only for the optional upgrade. A
+          # mistyped stable tag would otherwise reach the performance
+          # comparison, miss its published baseline, and silently skip the
+          # regression check through the missing-baseline path.
+          for component in api indexer; do
+            docker buildx imagetools inspect \
+              "cardanofoundation/cardano-rosetta-java-${component}:${STABLE_TAG}"
+          done
+
+  preprod:
+    if: ${{ inputs.scope == 'preprod' || inputs.scope == 'all' }}
+    needs: validate
+    uses: ./.github/workflows/release-test-preprod.yaml
+    with:
+      prerelease_tag: ${{ inputs.prerelease_tag }}
+      source_sha: ${{ needs.validate.outputs.source_sha }}
+
+  mainnet-k8s:
+    if: ${{ inputs.scope == 'mainnet' || inputs.scope == 'all' }}
+    needs: validate
+    uses: ./.github/workflows/release-test-mainnet-k8s.yaml
+    with:
+      prerelease_tag: ${{ inputs.prerelease_tag }}
+      clean_resync: ${{ inputs.clean_resync }}
+      run_upgrade: ${{ inputs.run_upgrade }}
+      source_sha: ${{ needs.validate.outputs.source_sha }}
+      stable_tag: ${{ inputs.stable_tag }}
+
+  mainnet-compose:
+    if: ${{ inputs.scope == 'mainnet' || inputs.scope == 'all' }}
+    needs: validate
+    uses: ./.github/workflows/release-test-mainnet-compose.yaml
+    with:
+      prerelease_tag: ${{ inputs.prerelease_tag }}
+      clean_resync: ${{ inputs.clean_resync }}
+      run_upgrade: ${{ inputs.run_upgrade }}
+      source_sha: ${{ needs.validate.outputs.source_sha }}
+      stable_tag: ${{ inputs.stable_tag }}
+
+  summary:
+    if: ${{ always() }}
+    needs:
+      - validate
+      - preprod
+      - mainnet-k8s
+      - mainnet-compose
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Write release verification summary
+        run: |
+          cat <<'EOF' >> "$GITHUB_STEP_SUMMARY"
+          # Release verification
+
+          | Workflow | Result |
+          |---|---|
+          | Input and image validation | `${{ needs.validate.result }}` |
+          | Preprod E2E | `${{ needs.preprod.result }}` |
+          | Mainnet K8s | `${{ needs['mainnet-k8s'].result }}` |
+          | Mainnet Docker Compose | `${{ needs['mainnet-compose'].result }}` |
+          EOF
+
+          if [[ "${{ needs.validate.result }}" != "success" ||
+                "${{ needs.preprod.result }}" != "success" ||
+                "${{ needs['mainnet-k8s'].result }}" != "success" ||
+                "${{ needs['mainnet-compose'].result }}" != "success" ]]; then
+            exit 1
+          fi
