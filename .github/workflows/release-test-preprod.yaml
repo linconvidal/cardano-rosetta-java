@@ -87,12 +87,7 @@ jobs:
 
           for key in \
             BLOCKFROST_PROJECT_ID \
-            TEST_WALLET_MNEMONIC \
-            STAKE_POOL_HASH \
-            DREP_KEY_HASH_ID \
-            DREP_SCRIPT_HASH_ID \
-            POOL_REGISTRATION_CERT \
-            POOL_GOVERNANCE_PROPOSAL_ID; do
+            TEST_WALLET_MNEMONIC; do
             if ! grep -q "^${key}=." "$E2E_ENV_FILE"; then
               echo "Missing $key in $E2E_ENV_FILE."
               exit 1

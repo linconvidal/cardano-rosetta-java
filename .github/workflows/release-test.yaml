@@ -167,9 +167,7 @@ jobs:
           | Mainnet Docker Compose | `${{ needs['mainnet-compose'].result }}` |
           EOF
 
-          if [[ "${{ needs.validate.result }}" != "success" ||
-                "${{ needs.preprod.result }}" != "success" ||
-                "${{ needs['mainnet-k8s'].result }}" != "success" ||
-                "${{ needs['mainnet-compose'].result }}" != "success" ]]; then
-            exit 1
-          fi
+          [[ "${{ needs.validate.result }}" == "success" &&
+             ("${{ inputs.scope }}" == "mainnet" || "${{ needs.preprod.result }}" == "success") &&
+             ("${{ inputs.scope }}" == "preprod" || ("${{ needs['mainnet-k8s'].result }}" == "success" &&
+              "${{ needs['mainnet-compose'].result }}" == "success")) ]]

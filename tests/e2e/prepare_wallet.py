@@ -61,6 +61,8 @@ MNEMONIC = os.getenv("TEST_WALLET_MNEMONIC")
 # --- Constants ---
 MIN_ADA_ONLY_UTXOS = 11
 MIN_ADA_FOR_FEES = 5_000_000  # 5 ADA in lovelace
+# 500 ADA pool deposit plus headroom for the rest of the suite.
+MIN_E2E_ADA_ONLY_LOVELACE = 525_000_000
 SPLIT_OUTPUT_LOVELACE = 25_000_000  # 25 ADA per split output
 SPLIT_NUM_OUTPUTS = 12
 SPLIT_FEE_HEADROOM = 2_000_000  # ~2 ADA headroom for fees
@@ -184,8 +186,9 @@ def select_ada_utxos(all_utxos, required_lovelace: int, max_count: int = MAX_INP
 
 
 def analyze_utxos(utxos):
-    """Analyze Blockfrost UTXOs. Returns (ada_only_count, with_tokens_count, has_fee_utxo, total_lovelace)."""
+    """Analyze Blockfrost UTXOs."""
     ada_only_count = 0
+    ada_only_lovelace = 0
     with_tokens_count = 0
     has_fee_utxo = False
     total_lovelace = 0
@@ -196,12 +199,19 @@ def analyze_utxos(utxos):
         total_lovelace += lovelace
         if len(units) == 1 and units[0] == "lovelace":
             ada_only_count += 1
+            ada_only_lovelace += lovelace
             if lovelace >= MIN_ADA_FOR_FEES:
                 has_fee_utxo = True
         else:
             with_tokens_count += 1
 
-    return ada_only_count, with_tokens_count, has_fee_utxo, total_lovelace
+    return (
+        ada_only_count,
+        ada_only_lovelace,
+        with_tokens_count,
+        has_fee_utxo,
+        total_lovelace,
+    )
 
 
 # ── Commands ────────────────────────────────────────────────────────────────
@@ -308,7 +318,7 @@ def find_spo_votable_proposal() -> str | None:
                 detail.get("expired_epoch"),
             ])
             if is_open and spo_can_vote(detail):
-                return f"{tx_hash}{int(cert_index):02d}"
+                return f"{tx_hash}{int(cert_index):02x}"
         page += 1
 
 
@@ -451,7 +461,13 @@ def cmd_check():
         console.print(f"[bold red]FAIL:[/] No UTXOs found for {address}")
         sys.exit(1)
 
-    ada_only_count, with_tokens_count, has_fee_utxo, total_lovelace = analyze_utxos(utxos)
+    (
+        ada_only_count,
+        ada_only_lovelace,
+        with_tokens_count,
+        has_fee_utxo,
+        total_lovelace,
+    ) = analyze_utxos(utxos)
 
     utxo_table = Table(box=box.SIMPLE_HEAVY, title="Wallet UTXOs")
     utxo_table.add_column("UTXO", style="dim")
@@ -477,6 +493,11 @@ def cmd_check():
     check_table.add_column("Detail", style="dim")
 
     row("ADA-only UTXOs", ada_only_count >= MIN_ADA_ONLY_UTXOS, f"{ada_only_count}/{MIN_ADA_ONLY_UTXOS}")
+    row(
+        "E2E suite funds",
+        ada_only_lovelace >= MIN_E2E_ADA_ONLY_LOVELACE,
+        f"{ada_only_lovelace / 1e6:.2f}/{MIN_E2E_ADA_ONLY_LOVELACE / 1e6:.2f} ADA-only",
+    )
     row("Token bundle UTXO", with_tokens_count >= 1, "found" if with_tokens_count >= 1 else "missing")
     row("Fee UTXO (>= 5 ADA)", has_fee_utxo, "found" if has_fee_utxo else "missing")
 
@@ -497,8 +518,10 @@ def cmd_check():
             warn("Stake key", f"lookup error: {exc}")
 
     # ── 4. On-chain state: pool from cert ──
-    pool_cert = require_env("POOL_REGISTRATION_CERT")
-    if pool_cert and is_hex(pool_cert) and len(pool_cert) >= 60:
+    pool_cert = (os.getenv("POOL_REGISTRATION_CERT") or "").strip()
+    if not pool_cert:
+        warn("POOL_REGISTRATION_CERT", "not set; certificate test is statically skipped")
+    elif is_hex(pool_cert) and len(pool_cert) >= 60:
         # Extract pool key hash from cert CBOR (first 581c = 28-byte hash)
         idx = pool_cert.find("581c")
         if idx < 0:
@@ -526,7 +549,7 @@ def cmd_check():
                 else:
                     row("Pool from cert", True, f"{cert_pool_hash[:16]}... not registered "
                                                 f"(last action: {last_action or 'none'})")
-    elif pool_cert:
+    else:
         row("POOL_REGISTRATION_CERT", False, "not valid even-length hex")
 
     # ── 5. Governance values, resolved the way the suite resolves them ──
@@ -552,6 +575,9 @@ def cmd_check():
         hints = []
         if ada_only_count < MIN_ADA_ONLY_UTXOS:
             hints.append(f"Need {MIN_ADA_ONLY_UTXOS - ada_only_count} more ADA-only UTXOs → [bold]uv run prepare_wallet.py split[/]")
+        if ada_only_lovelace < MIN_E2E_ADA_ONLY_LOVELACE:
+            missing_ada = (MIN_E2E_ADA_ONLY_LOVELACE - ada_only_lovelace) / 1e6
+            hints.append(f"Need {missing_ada:.2f} more ADA in ADA-only UTXOs")
         if with_tokens_count < 1:
             hints.append("Need 1 token UTXO → [bold]uv run prepare_wallet.py mint[/]")
         gov_fails = [e for e in errors if e.startswith("DREP_") or e.startswith("POOL_GOVERNANCE")]

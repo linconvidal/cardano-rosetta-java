@@ -74,7 +74,7 @@ def test_pool_registration(
             client=rosetta_client,
             address=payment_address,
             required_amount=required_amount,
-            strategy="single",
+            strategy="multiple",
         )
 
         # 3. Build operations
