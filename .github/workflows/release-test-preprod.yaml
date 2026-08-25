@@ -20,6 +20,7 @@ env:
   E2E_ENV_FILE: ${{ github.repository == 'linconvidal/cardano-rosetta-java' && '/home/lincon/.config/cardano-rosetta-java/e2e-preprod.env' || '/home/integration/.config/cardano-rosetta-java/e2e-preprod.env' }}
   EXPECTED_HOST: ${{ github.repository == 'linconvidal/cardano-rosetta-java' && 'zur2-s-d-112.colo2.cf-systems.internal' || 'zur2-s-d-102.colo2.cf-systems.internal' }}
   PREPROD_ENV_FILE: ${{ github.repository == 'linconvidal/cardano-rosetta-java' && '/home/lincon/.config/cardano-rosetta-java/preprod-compose.env' || '/home/integration/.config/cardano-rosetta-java/preprod-compose.env' }}
+  E2E_DIR: ${{ github.workspace }}/workflow-source/tests/e2e
 
   # Dedicated stack, so a clean resync never touches the data the PR test stack
   # keeps under /opt/rosetta-java-preprod. Both stacks share this host's ports
@@ -95,6 +96,21 @@ jobs:
               exit 1
             fi
           done
+
+      # The deployment clone is deliberately reset to the immutable release
+      # source, which can predate this E2E harness (1.5.0 has no tests/e2e).
+      - name: Check out the workflow E2E harness
+        uses: actions/checkout@v4
+        with:
+          path: workflow-source
+          ref: ${{ github.sha }}
+
+      - name: Validate the E2E harness checkout
+        run: |
+          set -euo pipefail
+          test -f "$E2E_DIR/pyproject.toml"
+          test -f "$E2E_DIR/uv.lock"
+          test -f "$E2E_DIR/prepare_wallet.py"
 
       - name: Validate the dedicated data root
         run: |
@@ -288,7 +304,7 @@ jobs:
       - name: Link protected E2E configuration
         run: |
           set -euo pipefail
-          e2e_dir="$DEPLOY_DIR/tests/e2e"
+          e2e_dir="$E2E_DIR"
           env_link="$e2e_dir/.env"
           evidence_dir="$e2e_dir/test-results/$GITHUB_RUN_ID"
 
@@ -313,7 +329,7 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="$HOME/.local/bin:$PATH"
-          cd "$DEPLOY_DIR/tests/e2e"
+          cd "$E2E_DIR"
           uv sync --locked
           uv run python prepare_wallet.py check
 
@@ -324,7 +340,7 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="$HOME/.local/bin:$PATH"
-          cd "$DEPLOY_DIR/tests/e2e"
+          cd "$E2E_DIR"
           junit="test-results/$GITHUB_RUN_ID/e2e-preprod.xml"
           uv run pytest -v --tb=short --junitxml="$junit"
 
@@ -336,7 +352,7 @@ jobs:
         if: ${{ always() }}
         run: |
           set -euo pipefail
-          e2e_dir="$DEPLOY_DIR/tests/e2e"
+          e2e_dir="$E2E_DIR"
           evidence_dir="$e2e_dir/test-results/$GITHUB_RUN_ID"
           if [[ -f "$RUNNER_TEMP/e2e-start.marker" && -d "$e2e_dir/logs" ]]; then
             mkdir -p "$evidence_dir/logs"
@@ -348,7 +364,7 @@ jobs:
       - name: Remove E2E configuration link
         if: ${{ always() }}
         run: |
-          env_link="$DEPLOY_DIR/tests/e2e/.env"
+          env_link="$E2E_DIR/.env"
           if [[ -L "$env_link" && "$(readlink -f "$env_link")" == "$(readlink -f "$E2E_ENV_FILE")" ]]; then
             rm "$env_link"
           fi
@@ -376,7 +392,7 @@ jobs:
           )
 
           # Container logs are the only post-mortem left once the stack is gone.
-          evidence_dir="$DEPLOY_DIR/tests/e2e/test-results/$GITHUB_RUN_ID"
+          evidence_dir="$E2E_DIR/test-results/$GITHUB_RUN_ID"
           mkdir -p "$evidence_dir"
           "${compose[@]}" logs --no-color --timestamps \
             > "$evidence_dir/compose.log" 2>&1 || true
@@ -388,7 +404,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: preprod-e2e-${{ inputs.prerelease_tag }}
-          path: ${{ env.DEPLOY_DIR }}/tests/e2e/test-results/${{ github.run_id }}
+          path: ${{ env.E2E_DIR }}/test-results/${{ github.run_id }}
           if-no-files-found: warn
           overwrite: true
           retention-days: 30
