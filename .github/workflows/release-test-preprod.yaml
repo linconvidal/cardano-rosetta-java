@@ -165,6 +165,17 @@ jobs:
           git -C "$DEPLOY_DIR" checkout --detach --force "$SOURCE_SHA"
           git -C "$DEPLOY_DIR" reset --hard "$SOURCE_SHA"
 
+      # The current cardano-node image expects this variable, but the 1.x
+      # Compose source mounted /config without passing it into the container.
+      - name: Create the release Compose compatibility override
+        run: |
+          cat > "$RUNNER_TEMP/release-test-compose-override.yaml" <<'YAML'
+          services:
+            cardano-node:
+              environment:
+                CARDANO_CONFIG_CONTAINER_PATH: /config
+          YAML
+
       - name: Stop the PR test stack
         run: |
           set -euo pipefail
@@ -205,6 +216,7 @@ jobs:
             --env-file .env.docker-compose-profile-mid-level
             --env-file "$PREPROD_ENV_FILE"
             --file docker-compose.yaml
+            --file "$RUNNER_TEMP/release-test-compose-override.yaml"
           )
           "${compose[@]}" config --quiet
           "${compose[@]}" down --remove-orphans
@@ -262,6 +274,7 @@ jobs:
             --env-file .env.docker-compose-profile-mid-level
             --env-file "$PREPROD_ENV_FILE"
             --file docker-compose.yaml
+            --file "$RUNNER_TEMP/release-test-compose-override.yaml"
           )
 
           "${compose[@]}" pull api yaci-indexer
