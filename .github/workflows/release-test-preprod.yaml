@@ -40,6 +40,10 @@ env:
   MITHRIL_SYNC: "true"
   NETWORK: preprod
   PEER_DISCOVERY: "true"
+  # Current Compose files use RELEASE_VERSION; 1.x release sources use the
+  # component-specific names. Set all three to the verified candidate image.
+  API_DOCKER_IMAGE_TAG: ${{ inputs.prerelease_tag }}
+  INDEXER_DOCKER_IMAGE_TAG: ${{ inputs.prerelease_tag }}
   RELEASE_VERSION: ${{ inputs.prerelease_tag }}
   REMOVE_SPENT_UTXOS: "false"
   REMOVE_SPENT_UTXOS_LAST_BLOCKS_GRACE_COUNT: "129600"
