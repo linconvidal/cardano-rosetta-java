@@ -295,9 +295,10 @@ jobs:
           # must still report LIVE. Both contracts require synced=true.
           until curl -fs --header 'Content-Type: application/json' --data "$payload" \
                   "$endpoint/network/status" \
-                | jq -e '.sync_status.synced and \
-                    ((.sync_status | has("stage") | not) or .sync_status.stage == "LIVE")' \
-                  > /dev/null; do
+                | jq -e '
+                    .sync_status.synced and
+                    ((.sync_status | has("stage") | not) or .sync_status.stage == "LIVE")
+                  ' > /dev/null; do
             (( SECONDS < deadline )) || { echo "Clean Preprod resync did not reach LIVE in time."; exit 1; }
             (( ++attempt % 20 )) || echo "Clean Preprod resync: still waiting after $((SECONDS / 60))m."
             sleep 30
