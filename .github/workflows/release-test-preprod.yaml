@@ -14,10 +14,12 @@ permissions:
   contents: read
 
 env:
-  DEPLOY_DIR: /home/integration/release-tests/cardano-rosetta-java
-  E2E_ENV_FILE: /home/integration/.config/cardano-rosetta-java/e2e-preprod.env
-  EXPECTED_HOST: zur2-s-d-102.colo2.cf-systems.internal
-  PREPROD_ENV_FILE: /home/integration/.config/cardano-rosetta-java/preprod-compose.env
+  # TEMPORARY fork-only validation adaptation. The official repository keeps
+  # the permanent preview-server host and integration-owned path contract.
+  DEPLOY_DIR: ${{ github.repository == 'linconvidal/cardano-rosetta-java' && '/home/lincon/release-tests/cardano-rosetta-java' || '/home/integration/release-tests/cardano-rosetta-java' }}
+  E2E_ENV_FILE: ${{ github.repository == 'linconvidal/cardano-rosetta-java' && '/home/lincon/.config/cardano-rosetta-java/e2e-preprod.env' || '/home/integration/.config/cardano-rosetta-java/e2e-preprod.env' }}
+  EXPECTED_HOST: ${{ github.repository == 'linconvidal/cardano-rosetta-java' && 'zur2-s-d-112.colo2.cf-systems.internal' || 'zur2-s-d-102.colo2.cf-systems.internal' }}
+  PREPROD_ENV_FILE: ${{ github.repository == 'linconvidal/cardano-rosetta-java' && '/home/lincon/.config/cardano-rosetta-java/preprod-compose.env' || '/home/integration/.config/cardano-rosetta-java/preprod-compose.env' }}
 
   # Dedicated stack, so a clean resync never touches the data the PR test stack
   # keeps under /opt/rosetta-java-preprod. Both stacks share this host's ports
