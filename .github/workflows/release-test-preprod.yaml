@@ -1,8 +1,23 @@
-name: Release verification - Preprod E2E
+name: Pre-release testing - Preprod E2E
 
 on:
   workflow_call:
     inputs:
+      candidate_api_image:
+        required: true
+        type: string
+      candidate_cardano_node_image:
+        required: true
+        type: string
+      candidate_indexer_image:
+        required: true
+        type: string
+      candidate_mithril_image:
+        required: true
+        type: string
+      candidate_postgres_image:
+        required: true
+        type: string
       prerelease_tag:
         required: true
         type: string
@@ -14,18 +29,29 @@ permissions:
   contents: read
 
 env:
-  # TEMPORARY fork-only validation adaptation. The official repository keeps
-  # the permanent preview-server host and integration-owned path contract.
-  DEPLOY_DIR: ${{ github.repository == 'linconvidal/cardano-rosetta-java' && '/home/lincon/release-tests/cardano-rosetta-java' || '/home/integration/release-tests/cardano-rosetta-java' }}
-  E2E_ENV_FILE: ${{ github.repository == 'linconvidal/cardano-rosetta-java' && '/home/lincon/.config/cardano-rosetta-java/e2e-preprod.env' || '/home/integration/.config/cardano-rosetta-java/e2e-preprod.env' }}
-  EXPECTED_HOST: ${{ github.repository == 'linconvidal/cardano-rosetta-java' && 'zur2-s-d-112.colo2.cf-systems.internal' || 'zur2-s-d-102.colo2.cf-systems.internal' }}
-  PREPROD_ENV_FILE: ${{ github.repository == 'linconvidal/cardano-rosetta-java' && '/home/lincon/.config/cardano-rosetta-java/preprod-compose.env' || '/home/integration/.config/cardano-rosetta-java/preprod-compose.env' }}
-  E2E_DIR: ${{ github.workspace }}/workflow-source/tests/e2e
+  RELEASE_SCRIPTS: ${{ github.workspace }}/.release-automation/.github/scripts
+  PRERELEASE_TAG: ${{ inputs.prerelease_tag }}
+  SOURCE_SHA: ${{ inputs.source_sha }}
+  COMPOSE_BASE_ENV: .env.docker-compose-preprod
+  COMPOSE_ENV_FILE: /home/integration/.config/cardano-rosetta-java/preprod-compose.env
+  GIT_CONFIG_COUNT: "1"
+  GIT_CONFIG_GLOBAL: /dev/null
+  GIT_CONFIG_KEY_0: core.hooksPath
+  GIT_CONFIG_SYSTEM: /dev/null
+  GIT_CONFIG_VALUE_0: /dev/null
 
-  # Dedicated stack, so a clean resync never touches the data the PR test stack
-  # keeps under /opt/rosetta-java-preprod. Both stacks share this host's ports
-  # and Docker network, so they are serialized by the concurrency group below
-  # and this job stops the PR stack before starting its own.
+  API_IMAGE: ${{ inputs.candidate_api_image }}
+  CARDANO_NODE_IMAGE: ${{ inputs.candidate_cardano_node_image }}
+  DEPLOY_DIR: /home/integration/release-tests/cardano-rosetta-java
+  E2E_ENV_FILE: /home/integration/.config/cardano-rosetta-java/e2e-preprod.env
+  EXPECTED_HOST: zur2-s-d-102.colo2.cf-systems.internal
+  INDEXER_IMAGE: ${{ inputs.candidate_indexer_image }}
+  MITHRIL_IMAGE: ${{ inputs.candidate_mithril_image }}
+  POSTGRES_IMAGE: ${{ inputs.candidate_postgres_image }}
+
+  # The dedicated release stack is isolated from the PR stack's data. Both
+  # stacks share host ports and a Docker network, so this job stops the exact
+  # running PR containers temporarily and restores them during cleanup.
   PROJECT_NAME: rosetta-release-test
   PR_PROJECT_NAME: cardano-rosetta-java
   CLEANUP_ROOT: /opt/rosetta-release-test
@@ -37,21 +63,14 @@ env:
   CARDANO_NODE_DIR: /opt/rosetta-release-test/node_data
   DB_PATH: /opt/rosetta-release-test/sql_data
   DB_PORT: "5433"
-  MITHRIL_SYNC: "true"
   NETWORK: preprod
   PEER_DISCOVERY: "true"
-  # Current Compose files use RELEASE_VERSION; 1.x release sources use the
-  # component-specific names. Set all three to the verified candidate image.
-  API_DOCKER_IMAGE_TAG: ${{ inputs.prerelease_tag }}
-  INDEXER_DOCKER_IMAGE_TAG: ${{ inputs.prerelease_tag }}
   RELEASE_VERSION: ${{ inputs.prerelease_tag }}
   REMOVE_SPENT_UTXOS: "false"
-  REMOVE_SPENT_UTXOS_LAST_BLOCKS_GRACE_COUNT: "129600"
   TOKEN_REGISTRY_BASE_URL: https://preprod.tokens.cardano.org/api
   TOKEN_REGISTRY_CACHE_TTL_HOURS: "1"
   TOKEN_REGISTRY_ENABLED: "true"
   TOKEN_REGISTRY_LOGO_FETCH: "true"
-  TOKEN_REGISTRY_REQUEST_TIMEOUT_SECONDS: "2"
 
 jobs:
   e2e:
@@ -61,60 +80,37 @@ jobs:
       cancel-in-progress: false
     timeout-minutes: 480
     steps:
-      - name: Validate runner prerequisites
+      - name: Check out immutable test automation
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-automation
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+
+      - name: Validate runner prerequisites and release source
         run: |
           set -euo pipefail
           export PATH="$HOME/.local/bin:$PATH"
 
-          for command in curl docker find git jq realpath stat sudo uv; do
+          for command in curl docker find findmnt git jq realpath stat sudo uv; do
             command -v "$command"
           done
           docker compose version
           sudo -n true
-
-          if [[ "$(hostname -f)" != "$EXPECTED_HOST" ]]; then
-            echo "Expected runner host $EXPECTED_HOST, found $(hostname -f)."
-            exit 1
-          fi
-          test -d "$DEPLOY_DIR/.git"
-
-          for protected_file in "$E2E_ENV_FILE" "$PREPROD_ENV_FILE"; do
-            test -f "$protected_file"
-            mode=$(stat -c '%a' "$protected_file")
-            if [[ "$mode" != "600" && "$mode" != "400" ]]; then
-              echo "$protected_file must have mode 600 or 400, found $mode."
-              exit 1
-            fi
-          done
-
-          if ! grep -q '^DB_SECRET=.' "$PREPROD_ENV_FILE"; then
-            echo "Missing DB_SECRET in $PREPROD_ENV_FILE."
+          docker_platform=$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')
+          if [[ "$docker_platform" != "linux/amd64" ]]; then
+            echo "Release images require a linux/amd64 Docker server, found $docker_platform."
             exit 1
           fi
 
-          for key in \
-            BLOCKFROST_PROJECT_ID \
-            TEST_WALLET_MNEMONIC; do
-            if ! grep -q "^${key}=." "$E2E_ENV_FILE"; then
-              echo "Missing $key in $E2E_ENV_FILE."
-              exit 1
-            fi
-          done
-
-      # The deployment clone is deliberately reset to the immutable release
-      # source, which can predate this E2E harness (1.5.0 has no tests/e2e).
-      - name: Check out the workflow E2E harness
-        uses: actions/checkout@v4
-        with:
-          path: workflow-source
-          ref: ${{ github.sha }}
-
-      - name: Validate the E2E harness checkout
-        run: |
-          set -euo pipefail
-          test -f "$E2E_DIR/pyproject.toml"
-          test -f "$E2E_DIR/uv.lock"
-          test -f "$E2E_DIR/prepare_wallet.py"
+          source "$RELEASE_SCRIPTS/release_test_source.sh"
+          release_source fetch
+          require_protected_file "$E2E_ENV_FILE"
+          require_protected_file "$COMPOSE_ENV_FILE"
+          require_single_value "$COMPOSE_ENV_FILE" DB_SECRET
+          require_single_value "$E2E_ENV_FILE" BLOCKFROST_PROJECT_ID
+          require_single_value "$E2E_ENV_FILE" TEST_WALLET_MNEMONIC
 
       - name: Validate the dedicated data root
         run: |
@@ -142,108 +138,49 @@ jobs:
           fi
           echo "Data root $CLEANUP_ROOT has ${free_gib}GiB available."
 
-      - name: Check out verified release source in the deployment clone
-        env:
-          PRERELEASE_TAG: ${{ inputs.prerelease_tag }}
-          SOURCE_SHA: ${{ inputs.source_sha }}
+
+      - name: Prepare pinned candidate images for Compose
         run: |
           set -euo pipefail
-          SOURCE_TAG="${PRERELEASE_TAG%-pre-release}"
-          origin_url=$(git -C "$DEPLOY_DIR" remote get-url origin)
-          if [[ "$origin_url" != "https://github.com/cardano-foundation/cardano-rosetta-java.git" &&
-                "$origin_url" != "git@github.com:cardano-foundation/cardano-rosetta-java.git" ]]; then
-            echo "Unexpected deployment clone origin: $origin_url"
-            exit 1
-          fi
+          source "$RELEASE_SCRIPTS/release_test_compose.sh"
+          prepare_compose_images
 
-          git -C "$DEPLOY_DIR" fetch --tags --prune origin
-          resolved_sha=$(git -C "$DEPLOY_DIR" rev-parse "${SOURCE_TAG}^{commit}")
-          if [[ "$resolved_sha" != "$SOURCE_SHA" ]]; then
-            echo "Release source mismatch: expected $SOURCE_SHA, found $resolved_sha."
-            exit 1
-          fi
-          git -C "$DEPLOY_DIR" checkout --detach --force "$SOURCE_SHA"
-          git -C "$DEPLOY_DIR" reset --hard "$SOURCE_SHA"
+          verify_compose_config
 
-      # The current cardano-node image expects this variable, but the 1.x
-      # Compose source mounted /config without passing it into the container.
-      - name: Create the release Compose compatibility override
-        run: |
-          cat > "$RUNNER_TEMP/release-test-compose-override.yaml" <<'YAML'
-          services:
-            cardano-node:
-              environment:
-                CARDANO_CONFIG_CONTAINER_PATH: /config
-          YAML
-
-      - name: Stop the PR test stack
+      - name: Stop running PR test containers
         run: |
           set -euo pipefail
-          cd "$DEPLOY_DIR"
+          mapfile -t pr_containers < <(docker ps \
+            --filter "label=com.docker.compose.project=${PR_PROJECT_NAME}" \
+            --format '{{.ID}}')
+          if (( ${#pr_containers[@]} == 0 )); then
+            echo "The PR test stack was not running."
+            exit 0
+          fi
 
-          # Frees this host's ports and Docker network for the release stack.
-          # Only containers labelled with the PR project are removed; the data
-          # under /opt/rosetta-java-preprod is left untouched and the next PR
-          # run recreates the stack from it.
-          docker compose \
-            --project-name "$PR_PROJECT_NAME" \
-            --env-file .env.docker-compose-preprod \
-            --env-file .env.docker-compose-profile-mid-level \
-            --file docker-compose.yaml \
-            down --remove-orphans
+          marker="$RUNNER_TEMP/pr-stack-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.containers"
+          printf '%s\n' "${pr_containers[@]}" > "$marker"
+          docker stop --time 60 "${pr_containers[@]}"
+          echo "Stopped ${#pr_containers[@]} PR test containers without removing them."
 
       - name: Delete the dedicated release-test data
-        env:
-          SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
 
-          if [[ "$(hostname -f)" != "$EXPECTED_HOST" ]]; then
-            echo "Runner host changed after preflight."
-            exit 1
-          fi
-          current_sha=$(git -C "$DEPLOY_DIR" rev-parse HEAD)
-          if [[ "$current_sha" != "$SOURCE_SHA" ]]; then
-            echo "Deployment clone drifted after preflight."
-            exit 1
-          fi
+          source "$RELEASE_SCRIPTS/release_test_source.sh"
+          release_source assert
 
-          cd "$DEPLOY_DIR"
-          compose=(
-            docker compose
-            --project-name "$PROJECT_NAME"
-            --env-file .env.docker-compose-preprod
-            --env-file .env.docker-compose-profile-mid-level
-            --env-file "$PREPROD_ENV_FILE"
-            --file docker-compose.yaml
-            --file "$RUNNER_TEMP/release-test-compose-override.yaml"
-          )
-          "${compose[@]}" config --quiet
-          "${compose[@]}" down --remove-orphans
+          source "$RELEASE_SCRIPTS/release_test_compose.sh"
+          release_compose config --quiet
+          release_compose down
 
-          # Plain command substitution, so a Docker failure aborts the step
-          # instead of leaving an empty list that skips the guard below.
-          containers=$(docker ps --all --quiet)
-          for container in $containers; do
-            mounts=$(docker inspect "$container" \
-              --format '{{range .Mounts}}{{println .Source}}{{end}}')
-            while IFS= read -r mount; do
-              [[ -n "$mount" ]] || continue
-              for data_path in "$DB_PATH" "$CARDANO_NODE_DIR"; do
-                # Matches the path itself, any parent of it, and anything nested
-                # inside it, so a differently shaped mount cannot slip through.
-                if [[ "$mount" == "$data_path" ||
-                      "$data_path" == "$mount"/* ||
-                      "$mount" == "$data_path"/* ]]; then
-                  name=$(docker inspect "$container" --format '{{.Name}}')
-                  echo "Refusing to delete $data_path, still referenced by $name."
-                  exit 1
-                fi
-              done
-            done <<<"$mounts"
-          done
+          verify_compose_mounts unmounted
 
           root_device=$(stat -c '%d' "$CLEANUP_ROOT")
+          host_mounts=$(
+            findmnt --json --output TARGET |
+              jq -er '.filesystems[] | recurse(.children[]?) | .target'
+          )
           for data_path in "$DB_PATH" "$CARDANO_NODE_DIR"; do
             sudo mkdir -p "$data_path"
             if [[ ! -d "$data_path" || -L "$data_path" ]]; then
@@ -258,6 +195,12 @@ jobs:
               echo "Refusing cleanup across a different filesystem: $data_path"
               exit 1
             fi
+            while IFS= read -r mount; do
+              if [[ "$mount" == "$data_path" || "$mount" == "$data_path"/* ]]; then
+                echo "Refusing cleanup across host mount $mount under $data_path."
+                exit 1
+              fi
+            done <<< "$host_mounts"
             sudo find "$data_path" -xdev -mindepth 1 -delete
           done
           echo "Cleared $DB_PATH and $CARDANO_NODE_DIR for a clean resync."
@@ -265,68 +208,26 @@ jobs:
       - name: Deploy pre-release images
         run: |
           set -euo pipefail
-          cd "$DEPLOY_DIR"
-
-          compose=(
-            docker compose
-            --project-name "$PROJECT_NAME"
-            --env-file .env.docker-compose-preprod
-            --env-file .env.docker-compose-profile-mid-level
-            --env-file "$PREPROD_ENV_FILE"
-            --file docker-compose.yaml
-            --file "$RUNNER_TEMP/release-test-compose-override.yaml"
-          )
-
-          "${compose[@]}" pull api yaci-indexer
-          "${compose[@]}" up -d
+          source "$RELEASE_SCRIPTS/release_test_compose.sh"
+          touch "$RUNNER_TEMP/release-deployed-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.marker"
+          release_compose up --detach --pull never --no-build
 
       - name: Wait for the clean Preprod resync to reach LIVE
         env:
-          PRERELEASE_TAG: ${{ inputs.prerelease_tag }}
+          PHASE: Clean Preprod resync
+          SYNC_TIMEOUT_SECONDS: "21600"
+          POLL_INTERVAL_SECONDS: "30"
         run: |
           set -euo pipefail
-          endpoint=http://127.0.0.1:8082
-
-          payload='{"network_identifier":{"blockchain":"cardano","network":"preprod"}}'
-          deadline=$((SECONDS + 21600))
-          attempt=0
-
-          # The 1.x API has no sync_status.stage; current releases expose it and
-          # must still report LIVE. Both contracts require synced=true.
-          until curl -fs --header 'Content-Type: application/json' --data "$payload" \
-                  "$endpoint/network/status" \
-                | jq -e '
-                    .sync_status.synced and
-                    ((.sync_status | has("stage") | not) or .sync_status.stage == "LIVE")
-                  ' > /dev/null; do
-            (( SECONDS < deadline )) || { echo "Clean Preprod resync did not reach LIVE in time."; exit 1; }
-            (( ++attempt % 20 )) || echo "Clean Preprod resync: still waiting after $((SECONDS / 60))m."
-            sleep 30
-          done
-
-          version=$(curl -fsS --header 'Content-Type: application/json' --data "$payload" \
-            "$endpoint/network/options" | jq -r '.version.middleware_version')
-          if [[ "$version" != "${PRERELEASE_TAG%-pre-release}" ]]; then
-            echo "Clean Preprod resync reports middleware $version, expected ${PRERELEASE_TAG%-pre-release}."
-            exit 1
-          fi
-          echo "Clean Preprod resync is LIVE on $version."
-
-          for service in api yaci-indexer; do
-            image=$(docker ps \
-              --filter "label=com.docker.compose.project=${PROJECT_NAME}" \
-              --filter "label=com.docker.compose.service=${service}" \
-              --format '{{.Image}}')
-            if [[ "$image" != *":${PRERELEASE_TAG}" ]]; then
-              echo "Expected $service on ${PRERELEASE_TAG}, found ${image:-none}."
-              exit 1
-            fi
-          done
+          source "$RELEASE_SCRIPTS/release_test_runtime.sh"
+          source "$RELEASE_SCRIPTS/release_test_compose.sh"
+          wait_for_release_live http://127.0.0.1:8082 preprod "${PRERELEASE_TAG%-pre-release}"
+          verify_compose_candidate
 
       - name: Link protected E2E configuration
         run: |
           set -euo pipefail
-          e2e_dir="$E2E_DIR"
+          e2e_dir="$DEPLOY_DIR/tests/e2e"
           env_link="$e2e_dir/.env"
           evidence_dir="$e2e_dir/test-results/$GITHUB_RUN_ID"
 
@@ -335,13 +236,13 @@ jobs:
               echo "Refusing to replace operator-managed $env_link."
               exit 1
             fi
-            rm "$env_link"
+            mv "$env_link" "$RUNNER_TEMP/e2e-env-link-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-before"
           fi
 
           mkdir -p "$evidence_dir"
           # Kept outside the uploaded directory: a marker inside it would make
           # if-no-files-found on the artifact unable to ever detect real absence.
-          touch "$RUNNER_TEMP/e2e-start.marker"
+          touch "$RUNNER_TEMP/e2e-start-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.marker"
           ln -s "$E2E_ENV_FILE" "$env_link"
 
       - name: Prepare E2E environment and wallet
@@ -351,7 +252,7 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="$HOME/.local/bin:$PATH"
-          cd "$E2E_DIR"
+          cd "$DEPLOY_DIR/tests/e2e"
           uv sync --locked
           uv run python prepare_wallet.py check
 
@@ -362,7 +263,7 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="$HOME/.local/bin:$PATH"
-          cd "$E2E_DIR"
+          cd "$DEPLOY_DIR/tests/e2e"
           junit="test-results/$GITHUB_RUN_ID/e2e-preprod.xml"
           uv run pytest -v --tb=short --junitxml="$junit"
 
@@ -374,21 +275,25 @@ jobs:
         if: ${{ always() }}
         run: |
           set -euo pipefail
-          e2e_dir="$E2E_DIR"
+          e2e_dir="$DEPLOY_DIR/tests/e2e"
           evidence_dir="$e2e_dir/test-results/$GITHUB_RUN_ID"
-          if [[ -f "$RUNNER_TEMP/e2e-start.marker" && -d "$e2e_dir/logs" ]]; then
+          start_marker="$RUNNER_TEMP/e2e-start-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.marker"
+          if [[ -f "$start_marker" && -d "$e2e_dir/logs" ]]; then
             mkdir -p "$evidence_dir/logs"
             find "$e2e_dir/logs" -maxdepth 1 -type f \
-              -newer "$RUNNER_TEMP/e2e-start.marker" \
+              -newer "$start_marker" \
               -exec cp -- {} "$evidence_dir/logs/" \;
           fi
 
       - name: Remove E2E configuration link
         if: ${{ always() }}
         run: |
-          env_link="$E2E_DIR/.env"
-          if [[ -L "$env_link" && "$(readlink -f "$env_link")" == "$(readlink -f "$E2E_ENV_FILE")" ]]; then
-            rm "$env_link"
+          env_link="$DEPLOY_DIR/tests/e2e/.env"
+          start_marker="$RUNNER_TEMP/e2e-start-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.marker"
+          if [[ -f "$start_marker" &&
+                -L "$env_link" &&
+                "$(readlink -f "$env_link")" == "$(readlink -f "$E2E_ENV_FILE")" ]]; then
+            mv "$env_link" "$RUNNER_TEMP/e2e-env-link-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-after"
           fi
 
       - name: Tear down the release stack
@@ -396,37 +301,69 @@ jobs:
         run: |
           set -euo pipefail
 
-          # The host must be left free, otherwise the release stack keeps this
-          # port set bound and the next PR run fails to start.
-          if [[ ! -d "$DEPLOY_DIR" || ! -f "$PREPROD_ENV_FILE" ]]; then
+          marker="$RUNNER_TEMP/release-deployed-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.marker"
+          if [[ ! -f "$marker" ]]; then
+            echo "This run did not start the release stack, refusing to tear down a stack."
+            exit 0
+          fi
+          if [[ ! -d "$DEPLOY_DIR/.git" || ! -f "$COMPOSE_ENV_FILE" ]]; then
             echo "Nothing was deployed, nothing to tear down."
             exit 0
           fi
-          cd "$DEPLOY_DIR"
-
-          compose=(
-            docker compose
-            --project-name "$PROJECT_NAME"
-            --env-file .env.docker-compose-preprod
-            --env-file .env.docker-compose-profile-mid-level
-            --env-file "$PREPROD_ENV_FILE"
-            --file docker-compose.yaml
-          )
+          source "$RELEASE_SCRIPTS/release_test_source.sh"
+          release_source assert
+          source "$RELEASE_SCRIPTS/release_test_compose.sh"
 
           # Container logs are the only post-mortem left once the stack is gone.
-          evidence_dir="$E2E_DIR/test-results/$GITHUB_RUN_ID"
+          evidence_dir="$DEPLOY_DIR/tests/e2e/test-results/$GITHUB_RUN_ID"
           mkdir -p "$evidence_dir"
-          "${compose[@]}" logs --no-color --timestamps \
-            > "$evidence_dir/compose.log" 2>&1 || true
+          if ! release_compose logs --no-color --timestamps \
+              > "$evidence_dir/compose.log" \
+              2> "$evidence_dir/compose-logs.stderr"; then
+            echo "Compose log collection failed; see compose-logs.stderr in the evidence artifact."
+          fi
 
-          "${compose[@]}" down --remove-orphans
+          release_compose down
+          mv "$marker" "${marker}.finished"
+
+      - name: Restore PR test containers
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          marker="$RUNNER_TEMP/pr-stack-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.containers"
+          if [[ ! -f "$marker" ]]; then
+            echo "The PR test stack was not running before pre-release testing."
+            exit 0
+          fi
+
+          mapfile -t pr_containers < "$marker"
+          if (( ${#pr_containers[@]} == 0 )); then
+            echo "The saved PR container list is empty."
+            exit 1
+          fi
+          for container in "${pr_containers[@]}"; do
+            project=$(docker inspect "$container" \
+              --format '{{index .Config.Labels "com.docker.compose.project"}}')
+            if [[ "$project" != "$PR_PROJECT_NAME" ]]; then
+              echo "Refusing to start container $container from project $project."
+              exit 1
+            fi
+          done
+          docker start "${pr_containers[@]}"
+          for container in "${pr_containers[@]}"; do
+            if [[ "$(docker inspect "$container" --format '{{.State.Running}}')" != "true" ]]; then
+              echo "PR container $container did not return to the running state."
+              exit 1
+            fi
+          done
+          echo "Restored ${#pr_containers[@]} PR test containers."
 
       - name: Upload E2E evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: preprod-e2e-${{ inputs.prerelease_tag }}
-          path: ${{ env.E2E_DIR }}/test-results/${{ github.run_id }}
-          if-no-files-found: warn
+          path: ${{ env.DEPLOY_DIR }}/tests/e2e/test-results/${{ github.run_id }}
+          if-no-files-found: error
           overwrite: true
           retention-days: 30

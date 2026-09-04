@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Compare a candidate CSV with an exact performance table published under docs."""
+"""Compare a candidate CSV with a compatible performance table published under docs."""
 
 from __future__ import annotations
 
 import argparse
 import csv
+import math
+import re
 from pathlib import Path
 
 
@@ -33,20 +35,34 @@ PUBLISHED_HEADERS = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--baseline-doc", type=Path, required=True)
-    parser.add_argument("--stable-tag", required=True)
+    parser.add_argument("--test-results-root", type=Path, required=True)
+    parser.add_argument("--candidate-tag", required=True)
+    parser.add_argument("--documentation-name", required=True)
+    parser.add_argument("--expected-hardware-profile", required=True)
     parser.add_argument("--candidate-dir", type=Path)
-    parser.add_argument("--candidate-tag")
     parser.add_argument("--deployment")
-    parser.add_argument("--documentation-name")
-    parser.add_argument("--expected-hardware-profile")
-    parser.add_argument("--allow-missing-baseline", action="store_true")
     parser.add_argument("--check-baseline-only", action="store_true")
     return parser.parse_args()
 
 
-def number(value: str) -> float:
-    return float(value.strip().removesuffix("ms").removesuffix("%"))
+DECIMAL = re.compile(r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?")
+INTEGER = re.compile(r"(?:0|[1-9][0-9]*)")
+
+
+def decimal(value: str, field: str, suffix: str = "") -> float:
+    pattern = rf"{DECIMAL.pattern}{re.escape(suffix)}"
+    if not isinstance(value, str) or re.fullmatch(pattern, value) is None:
+        raise ValueError(f"Invalid {field} value: {value!r}")
+    parsed = float(value.removesuffix(suffix) if suffix else value)
+    if not math.isfinite(parsed):
+        raise ValueError(f"Expected a finite {field}, found {value}")
+    return parsed
+
+
+def integer(value: str, field: str) -> int:
+    if not isinstance(value, str) or INTEGER.fullmatch(value) is None:
+        raise ValueError(f"Invalid {field} value: {value!r}")
+    return int(value)
 
 
 def endpoint_labels(rows: list[dict[str, str]]) -> list[str]:
@@ -62,7 +78,11 @@ def endpoint_labels(rows: list[dict[str, str]]) -> list[str]:
     return labels
 
 
-def validate_metrics(rows: list[dict[str, str]], source: Path) -> None:
+def validate_metrics(
+    rows: list[dict[str, str]],
+    source: Path,
+    latency_suffix: str,
+) -> None:
     if len(rows) != EXPECTED_ENDPOINT_COUNT:
         raise ValueError(
             f"Expected {EXPECTED_ENDPOINT_COUNT} endpoints in {source}, found {len(rows)}"
@@ -72,16 +92,32 @@ def validate_metrics(rows: list[dict[str, str]], source: Path) -> None:
         raise ValueError(f"Missing columns in {source}: {', '.join(sorted(missing))}")
 
     labels = endpoint_labels(rows)
-    if len(set(labels)) != EXPECTED_ENDPOINT_COUNT:
+    if len(set(labels)) != len(labels):
         raise ValueError(f"Duplicate endpoint labels in {source}")
 
+    expected_ids = [str(index) for index in range(1, EXPECTED_ENDPOINT_COUNT + 1)]
+    actual_ids = [row["ID"] for row in rows]
+    if actual_ids != expected_ids:
+        raise ValueError(f"Expected endpoint IDs {expected_ids} in {source}, found {actual_ids}")
+
     for row in rows:
-        if int(row["Max_Concurrency"]) <= 0:
-            raise ValueError(
-                f"No passing concurrency recorded for {row['Endpoint']} in {source}"
-            )
-        if number(row["Requests_per_sec"]) <= 0:
-            raise ValueError(f"No throughput recorded for {row['Endpoint']} in {source}")
+        endpoint = row["Endpoint"]
+        max_concurrency = integer(row["Max_Concurrency"], "max concurrency")
+        p95 = decimal(row["p95(ms)"], "p95 latency", latency_suffix)
+        p99 = decimal(row["p99(ms)"], "p99 latency", latency_suffix)
+        non_2xx = integer(row["Non_2xx_Responses"], "non-2xx response count")
+        error_rate = decimal(row["Error_Rate(%)"], "error rate", "%")
+        requests_per_sec = decimal(row["Requests_per_sec"], "requests per second")
+        if max_concurrency <= 0:
+            raise ValueError(f"No passing concurrency recorded for {endpoint} in {source}")
+        if p95 < 0 or p99 < 0 or p99 < p95:
+            raise ValueError(f"Invalid latency percentiles for {endpoint} in {source}")
+        if non_2xx < 0:
+            raise ValueError(f"Invalid non-2xx count for {endpoint} in {source}")
+        if not 0 <= error_rate <= 100:
+            raise ValueError(f"Invalid error rate for {endpoint} in {source}")
+        if requests_per_sec <= 0:
+            raise ValueError(f"No throughput recorded for {endpoint} in {source}")
 
 
 def read_candidate_csv(
@@ -122,8 +158,10 @@ def read_candidate_csv(
     machine_specs = {row["Machine_Specs"] for row in rows}
     if len(machine_specs) != 1:
         raise ValueError(f"Mixed machine specs in {path}: {', '.join(sorted(machine_specs))}")
+    if not next(iter(machine_specs)).strip():
+        raise ValueError(f"Machine specs are empty in {path}")
 
-    validate_metrics(rows, path)
+    validate_metrics(rows, path, "ms")
     return rows
 
 
@@ -132,6 +170,14 @@ def markdown_cells(line: str) -> list[str]:
     if not stripped.startswith("|") or not stripped.endswith("|"):
         return []
     return [cell.strip() for cell in stripped[1:-1].split("|")]
+
+
+def published_machine(path: Path) -> str:
+    prefix = "- **Machine Specs:**"
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith(prefix) and line.removeprefix(prefix).strip():
+            return line.removeprefix(prefix).strip()
+    return "not recorded in this published result"
 
 
 def read_published_doc(path: Path) -> list[dict[str, str]]:
@@ -158,7 +204,7 @@ def read_published_doc(path: Path) -> list[dict[str, str]]:
                     for header, value in zip(headers, cells, strict=True)
                 }
             )
-        validate_metrics(rows, path)
+        validate_metrics(rows, path, "")
         return rows
 
     raise ValueError(f"Published performance table not found in {path}")
@@ -201,9 +247,10 @@ def doc_table(rows: list[dict[str, str]]) -> str:
 def comparison_table(
     baseline: list[dict[str, str]],
     candidate: list[dict[str, str]],
-    stable_tag: str,
+    baseline_tag: str,
     deployment: str,
     baseline_path: Path,
+    baseline_machine: str,
 ) -> str:
     baseline_labels = endpoint_labels(baseline)
     candidate_labels = endpoint_labels(candidate)
@@ -213,27 +260,30 @@ def comparison_table(
     lines = [
         f"# Performance comparison: {deployment}",
         "",
-        f"- Stable: `{stable_tag}`",
+        f"- Published baseline: `{baseline_tag}`",
         f"- Candidate: `{candidate[0]['Release']}`",
-        f"- Published baseline: `{baseline_path}`",
-        f"- Machine: `{candidate[0]['Machine_Specs']}`",
+        f"- Published baseline file: `{baseline_path}`",
+        f"- Published baseline profile: `{baseline_path.parent.name}`",
+        f"- Published baseline machine: `{baseline_machine}`",
+        f"- Candidate profile: `{candidate[0]['Hardware_Profile']}`",
+        f"- Candidate machine: `{candidate[0]['Machine_Specs']}`",
         "- Decision: manual review required",
         "",
         "Positive latency deltas are slower. Positive concurrency and throughput deltas are higher.",
         "",
-        "| Endpoint | Stable max | Candidate max | Max delta | Stable p95 | Candidate p95 | p95 delta | Stable p99 | Candidate p99 | p99 delta | Stable req/s | Candidate req/s | Req/s delta |",
+        "| Endpoint | Baseline max | Candidate max | Max delta | Baseline p95 | Candidate p95 | p95 delta | Baseline p99 | Candidate p99 | p99 delta | Baseline req/s | Candidate req/s | Req/s delta |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
 
     for old, new, label in zip(baseline, candidate, baseline_labels, strict=True):
-        old_max = number(old["Max_Concurrency"])
-        new_max = number(new["Max_Concurrency"])
-        old_p95 = number(old["p95(ms)"])
-        new_p95 = number(new["p95(ms)"])
-        old_p99 = number(old["p99(ms)"])
-        new_p99 = number(new["p99(ms)"])
-        old_rps = number(old["Requests_per_sec"])
-        new_rps = number(new["Requests_per_sec"])
+        old_max = integer(old["Max_Concurrency"], "published max concurrency")
+        new_max = integer(new["Max_Concurrency"], "candidate max concurrency")
+        old_p95 = decimal(old["p95(ms)"], "published p95 latency")
+        new_p95 = decimal(new["p95(ms)"], "candidate p95 latency", "ms")
+        old_p99 = decimal(old["p99(ms)"], "published p99 latency")
+        new_p99 = decimal(new["p99(ms)"], "candidate p99 latency", "ms")
+        old_rps = decimal(old["Requests_per_sec"], "published requests per second")
+        new_rps = decimal(new["Requests_per_sec"], "candidate requests per second")
         lines.append(
             f"| {label} | {old_max:g} | {new_max:g} | {delta(old_max, new_max)} | "
             f"{old_p95:g} | {new_p95:g} | {delta(old_p95, new_p95)} | "
@@ -246,7 +296,7 @@ def comparison_table(
             "",
             "## Reliability",
             "",
-            "| Endpoint | Stable non-2xx | Candidate non-2xx | Stable error rate | Candidate error rate |",
+            "| Endpoint | Baseline non-2xx | Candidate non-2xx | Baseline error rate | Candidate error rate |",
             "|---|---:|---:|---:|---:|",
         ]
     )
@@ -261,24 +311,24 @@ def comparison_table(
 
 def missing_baseline_report(
     candidate: list[dict[str, str]],
-    stable_tag: str,
     deployment: str,
-    baseline_path: Path,
+    test_results_root: Path,
 ) -> str:
     return "\n".join(
         [
             f"# Performance comparison: {deployment}",
             "",
-            f"- Stable: `{stable_tag}`",
+            "- Published baseline: none",
             f"- Candidate: `{candidate[0]['Release']}`",
-            f"- Expected published baseline: `{baseline_path}`",
-            f"- Machine: `{candidate[0]['Machine_Specs']}`",
-            "- Decision: published baseline unavailable",
+            f"- Test results root: `{test_results_root}`",
+            f"- Candidate profile: `{candidate[0]['Hardware_Profile']}`",
+            f"- Candidate machine: `{candidate[0]['Machine_Specs']}`",
+            "- Decision: first publication",
             "",
-            "## Published baseline unavailable",
+            "## First publication",
             "",
-            "The candidate result is valid for publication, but no historical regression comparison was performed.",
-            "This is allowed for the first published result for this deployment.",
+            "No earlier result has been published for this deployment and hardware profile.",
+            "The candidate result is valid as that profile's first publication without a historical comparison.",
             "",
         ]
     )
@@ -291,31 +341,66 @@ def validate_documentation_name(name: str) -> str:
     return name
 
 
+SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
+
+
+def version_tuple(tag: str) -> tuple[int, int, int]:
+    source_tag = tag.removesuffix("-pre-release")
+    match = SEMVER.fullmatch(source_tag)
+    if match is None:
+        raise ValueError(f"Expected a semantic release tag, found {tag}")
+    return tuple(int(part) for part in match.groups())
+
+
+def discover_baseline(
+    test_results_root: Path,
+    candidate_tag: str,
+    hardware_profile: str,
+    documentation_name: str,
+) -> tuple[str, Path] | None:
+    candidate_version = version_tuple(candidate_tag)
+    candidates: list[tuple[tuple[int, int, int], str, Path]] = []
+    for path in test_results_root.glob(f"*/{hardware_profile}/{documentation_name}"):
+        match = SEMVER.fullmatch(path.parents[1].name)
+        if match is None or not path.is_file():
+            continue
+        version = tuple(int(part) for part in match.groups())
+        if version[0] == candidate_version[0] and version < candidate_version:
+            candidates.append((version, path.parents[1].name, path))
+
+    if not candidates:
+        return None
+    _, baseline_tag, baseline_path = max(candidates, key=lambda item: item[0])
+    return baseline_tag, baseline_path
+
+
 def main() -> None:
     args = parse_args()
-    baseline_doc = args.baseline_doc.resolve()
+    test_results_root = args.test_results_root.resolve()
+    if not test_results_root.is_dir():
+        raise FileNotFoundError(f"Test results root unavailable: {test_results_root}")
 
+    documentation_name = validate_documentation_name(args.documentation_name)
+    baseline_info = discover_baseline(
+        test_results_root,
+        args.candidate_tag,
+        args.expected_hardware_profile,
+        documentation_name,
+    )
     if args.check_baseline_only:
-        if not baseline_doc.is_file():
-            if args.allow_missing_baseline:
-                print(f"::warning::Published baseline unavailable: {baseline_doc}")
-                return
-            raise FileNotFoundError(f"Published baseline unavailable: {baseline_doc}")
+        if baseline_info is None:
+            print(
+                "::warning::No earlier published result; "
+                f"{documentation_name} will be a first publication."
+            )
+            return
+        baseline_tag, baseline_doc = baseline_info
         read_published_doc(baseline_doc)
-        print(f"Published baseline: {baseline_doc}")
+        print(f"Published baseline {baseline_tag}: {baseline_doc}")
         return
 
-    required = (
-        args.candidate_dir,
-        args.candidate_tag,
-        args.deployment,
-        args.documentation_name,
-    )
-    if any(value is None for value in required):
-        raise SystemExit(
-            "--candidate-dir, --candidate-tag, --deployment, and --documentation-name "
-            "are required for comparison"
-        )
+    if args.candidate_dir is None or args.deployment is None:
+        raise SystemExit("--candidate-dir and --deployment are required for comparison")
 
     candidate_dir = args.candidate_dir.resolve()
     candidate_csv = candidate_dir / "summary_results.csv"
@@ -325,33 +410,27 @@ def main() -> None:
         args.expected_hardware_profile,
     )
 
-    documentation_name = validate_documentation_name(args.documentation_name)
     candidate_doc = candidate_dir / documentation_name
     candidate_doc.write_text(doc_table(candidate), encoding="utf-8")
 
     comparison = candidate_dir / "performance-comparison.md"
-    if not baseline_doc.is_file():
-        if not args.allow_missing_baseline:
-            raise FileNotFoundError(f"Published baseline unavailable: {baseline_doc}")
-        report = missing_baseline_report(
-            candidate,
-            args.stable_tag,
-            args.deployment,
-            baseline_doc,
-        )
-        comparison.write_text(report, encoding="utf-8")
-        print(f"::warning::Published baseline unavailable: {baseline_doc}")
+    if baseline_info is None:
+        report = missing_baseline_report(candidate, args.deployment, test_results_root)
+        print(f"::warning::First publication for {documentation_name}")
     else:
+        baseline_tag, baseline_doc = baseline_info
         baseline = read_published_doc(baseline_doc)
+        baseline_machine = published_machine(baseline_doc)
         report = comparison_table(
             baseline,
             candidate,
-            args.stable_tag,
+            baseline_tag,
             args.deployment,
             baseline_doc,
+            baseline_machine,
         )
-        comparison.write_text(report, encoding="utf-8")
-        print(f"Published baseline: {baseline_doc}")
+        print(f"Published baseline {baseline_tag}: {baseline_doc}")
+    comparison.write_text(report, encoding="utf-8")
 
     print(f"Candidate: {candidate_csv}")
     print(f"Documentation table: {candidate_doc}")
