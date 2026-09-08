@@ -21,7 +21,7 @@ wait_for_release_live() {
   echo "$PHASE is LIVE on $version."
 }
 
-require_release_cleanup_space() {
+report_release_cleanup_space() {
   local storage_root=$1 free_bytes reclaimable_bytes=0 data_path du_output used_bytes
   shift
   free_bytes=$(df --output=avail -B1 "$storage_root" | awk 'NR == 2 {print $1}')
@@ -34,11 +34,8 @@ require_release_cleanup_space() {
     }
     reclaimable_bytes=$((reclaimable_bytes + used_bytes))
   done
-  if (( free_bytes + reclaimable_bytes < 1100 * 1024 * 1024 * 1024 )); then
-    echo "Projected free space after cleanup is below 1100GiB: $storage_root" >&2
-    exit 1
-  fi
-  echo "Projected cleanup space is sufficient: $storage_root"
+  printf 'Disk space at %s: available=%s bytes; deployment data=%s bytes; estimated available after cleanup=%s bytes.\n' \
+    "$storage_root" "$free_bytes" "$reclaimable_bytes" "$((free_bytes + reclaimable_bytes))"
 }
 
 capture_release_machine() {

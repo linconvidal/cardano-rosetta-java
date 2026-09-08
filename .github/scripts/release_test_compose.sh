@@ -5,7 +5,40 @@ release_compose() (
   cd "$DEPLOY_DIR" || exit
   docker compose --project-name "$PROJECT_NAME" \
     --env-file "$COMPOSE_BASE_ENV" --env-file .env.docker-compose-profile-mid-level \
-    --env-file "$COMPOSE_ENV_FILE" --file docker-compose.yaml "$@"
+    --file docker-compose.yaml "$@"
+)
+
+verify_compose_database_access() (
+  # Resolve exactly the application's Compose settings, including environment overrides.
+  # Keep the password out of command arguments and shell traces.
+  set +x
+  local config db_container
+  config=$(release_compose config --format json | jq -ce '
+    .services.api.environment | {DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_SECRET}
+    | select(all(.[]; type == "string" and length > 0))
+  ') || { echo "Could not resolve candidate Compose database settings." >&2; exit 1; }
+
+  db_container=$(docker ps \
+    --filter "label=com.docker.compose.project=${PROJECT_NAME}" \
+    --filter 'label=com.docker.compose.service=db' --format '{{.ID}}')
+  [[ -n "$db_container" && "$db_container" != *$'\n'* ]] || {
+    echo "Expected exactly one running database container for $PROJECT_NAME." >&2; exit 1;
+  }
+
+  local PGHOST PGPORT PGDATABASE PGUSER PGPASSWORD
+  PGHOST=$(jq -r '.DB_HOST' <<< "$config")
+  PGPORT=$(jq -r '.DB_PORT' <<< "$config")
+  PGDATABASE=$(jq -r '.DB_NAME' <<< "$config")
+  PGUSER=$(jq -r '.DB_USER' <<< "$config")
+  PGPASSWORD=$(jq -r '.DB_SECRET' <<< "$config")
+  export PGHOST PGPORT PGDATABASE PGUSER PGPASSWORD
+  # Use the application host/port, not the local Unix socket's trust authentication.
+  if ! docker exec --env PGHOST --env PGPORT --env PGDATABASE --env PGUSER \
+      --env PGPASSWORD --env PGCONNECT_TIMEOUT=10 "$db_container" \
+      psql --no-psqlrc --no-password --set ON_ERROR_STOP=1 --command 'SELECT 1;'; then
+    echo "Candidate Compose database authentication failed; deployment must not proceed." >&2
+    exit 1
+  fi
 )
 
 prepare_compose_images() {

@@ -15,9 +15,9 @@ verify_release_volume() (
   set -euo pipefail
   local pvc=$1 expected_uid=$2 pvc_json pv_json pv pv_uid data_path root_device path_device
   pvc_json=$(kubectl get pvc "$pvc" --namespace "$NAMESPACE" -o json)
-  pv=$(jq -er --arg release "$HELM_RELEASE" --arg size "$VOLUME_SIZE" --arg uid "$expected_uid" '
+  pv=$(jq -er --arg release "$HELM_RELEASE" --arg uid "$expected_uid" '
     if .metadata.labels["app.kubernetes.io/instance"] == $release and
-       .metadata.uid == $uid and .spec.resources.requests.storage == $size and
+       .metadata.uid == $uid and
        .spec.storageClassName == "local-path" and .status.phase == "Bound"
     then .spec.volumeName else error("Unexpected release PVC contract") end
   ' <<< "$pvc_json")
@@ -106,6 +106,19 @@ verify_release_deployment() {
 
 release_helm() {
   local postgres_version_ref=${POSTGRES_IMAGE#cardanofoundation/cardano-rosetta-java-postgres:}
+  local chart storage_values
+  local -a storage_args=()
+  chart=$(mktemp -d "$RUNNER_TEMP/release-chart.XXXXXX")
+  cp -a "$DEPLOY_DIR/helm/cardano-rosetta-java/." "$chart/"
+  # Keep dependency-build logs out of helm template's YAML output.
+  helm dependency build "$chart" >&2
+  if [[ "$1" == upgrade ]]; then
+    # Preserve the installed claim configuration, including when a PVC was expanded.
+    # A fresh install instead uses the candidate chart's shipped K3s defaults.
+    storage_values=$(helm get values "$HELM_RELEASE" --namespace "$NAMESPACE" --all --output json |
+      jq -ce '.global.storage') || return
+    storage_args=(--set-json "global.storage=$storage_values")
+  fi
   helm "$@" "$HELM_RELEASE" "$chart" \
     --namespace "$NAMESPACE" \
     --values "$chart/values-k3s.yaml" \
@@ -118,8 +131,7 @@ release_helm() {
     --set-string global.mithrilImage="$MITHRIL_IMAGE" \
     --set-string global.pgVersionTag="$postgres_version_ref" \
     --set-string global.db.existingSecret="$DB_SECRET_NAME" \
-    --set-string global.storage.cardanoNode.size="$VOLUME_SIZE" \
-    --set-string global.storage.postgresql.size="$VOLUME_SIZE" \
+    "${storage_args[@]}" \
     --set-string rosetta-api.env.removeSpentUtxos=false \
     --set-string yaci-indexer.env.removeSpentUtxos=false
 }

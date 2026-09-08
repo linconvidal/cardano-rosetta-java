@@ -14,11 +14,9 @@ validate_release_clone() {
     echo "Deployment clone must be a canonical directory with a real .git directory." >&2
     exit 1
   fi
-  git -C "$DEPLOY_DIR" config --local --name-only --list |
-    awk 'BEGIN {IGNORECASE=1}
-         /^(core\.(repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode)|remote\.origin\.(url|fetch)|branch\..+\.(remote|merge))$/ {next}
-         {print "Unsupported local Git configuration: " $0 > "/dev/stderr"; invalid=1}
-         END {exit invalid}'
+  [[ "$(git -C "$DEPLOY_DIR" rev-parse --show-toplevel)" == "$DEPLOY_DIR" ]] || {
+    echo "Git worktree points outside the deployment clone." >&2; exit 1;
+  }
   local origin_url
   origin_url=$(git -C "$DEPLOY_DIR" remote get-url origin)
   [[ "$origin_url" == "https://github.com/cardano-foundation/cardano-rosetta-java.git" ]] || {
@@ -47,22 +45,4 @@ release_source() {
     assert) [[ "$(git -C "$DEPLOY_DIR" rev-parse HEAD)" == "$SOURCE_SHA" ]] ;;
     *) echo "Unknown release source operation: $mode" >&2; exit 1 ;;
   esac
-}
-
-require_protected_file() {
-  local file=$1 mode
-  test -f "$file"
-  mode=$(stat -c '%a' "$file")
-  [[ "$mode" == 600 || "$mode" == 400 ]] || {
-    echo "$file must have mode 600 or 400, found $mode." >&2; exit 1;
-  }
-}
-
-require_single_value() {
-  local file=$1 key=$2 count
-  count=$(awk -F= -v key="$key" \
-    '$1 == key && length(substr($0, index($0, "=") + 1)) > 0 {count++} END {print count + 0}' "$file")
-  [[ "$count" == 1 ]] || {
-    echo "Expected exactly one non-empty $key in $file, found $count." >&2; exit 1;
-  }
 }

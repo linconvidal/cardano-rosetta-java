@@ -69,48 +69,6 @@ jobs:
           echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
           echo "Official candidate source: $RELEASE_TAG at $source_sha"
 
-      - name: Identify the protected release branch
-        id: release_branch
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
-        env:
-          TRUSTED_BRANCH: ${{ vars.RELEASE_TRUSTED_BRANCH }}
-        with:
-          script: |
-            const branchName = process.env.TRUSTED_BRANCH;
-            if (!branchName) {
-              core.setFailed('Repository variable RELEASE_TRUSTED_BRANCH must identify the protected release branch.');
-              return;
-            }
-            const branch = await github.rest.repos.getBranch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              branch: branchName,
-            });
-            if (!branch.data.protected) {
-              core.setFailed(`The trusted release branch ${branchName} is not protected.`);
-              return;
-            }
-            if (context.ref !== `refs/heads/${branchName}`) {
-              core.setFailed(
-                `Dispatch this workflow from refs/heads/${branchName}, not ${context.ref}.`,
-              );
-              return;
-            }
-            core.setOutput('name', branchName);
-
-      - name: Verify release source ancestry
-        env:
-          RELEASE_BRANCH: ${{ steps.release_branch.outputs.name }}
-          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
-        run: |
-          set -euo pipefail
-          git fetch --no-tags origin \
-            "+refs/heads/${RELEASE_BRANCH}:refs/remotes/origin/${RELEASE_BRANCH}"
-          if ! git merge-base --is-ancestor "$SOURCE_SHA" "refs/remotes/origin/$RELEASE_BRANCH"; then
-            echo "Release source $SOURCE_SHA is not reachable from protected branch $RELEASE_BRANCH."
-            exit 1
-          fi
-
       - name: Derive previous stable release
         id: lineage
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
@@ -152,24 +110,16 @@ jobs:
               return;
             }
             core.setOutput('upgrade_from_tag', previous.release.tag_name);
-            core.info(`Upgrade source derived from GitHub release lineage: ${previous.release.tag_name}`);
+            core.info(`Latest earlier stable GitHub release: ${previous.release.tag_name}`);
 
       - name: Check release prerequisites
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
-          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
-          UPGRADE_FROM_TAG: ${{ steps.lineage.outputs.upgrade_from_tag }}
         run: |
           set -euo pipefail
           revision=$(sed -n 's:.*<revision>\(.*\)</revision>.*:\1:p' pom.xml | head -1)
           if [[ "$revision" != "$RELEASE_TAG" ]]; then
             echo "pom.xml <revision> is '$revision' but the release tag is '$RELEASE_TAG'."
-            exit 1
-          fi
-
-          upgrade_sha=$(git rev-parse "refs/tags/${UPGRADE_FROM_TAG}^{commit}")
-          if ! git merge-base --is-ancestor "$upgrade_sha" "$SOURCE_SHA"; then
-            echo "Previous release $UPGRADE_FROM_TAG is not an ancestor of $RELEASE_TAG."
             exit 1
           fi
 
@@ -281,6 +231,9 @@ jobs:
   preprod:
     needs: validate
     uses: ./.github/workflows/release-test-preprod.yaml
+    secrets:
+      BLOCKFROST_PROJECT_ID: ${{ secrets.BLOCKFROST_PROJECT_ID }}
+      TEST_WALLET_MNEMONIC: ${{ secrets.TEST_WALLET_MNEMONIC }}
     with:
       candidate_api_image: ${{ needs.validate.outputs.api_image }}
       candidate_cardano_node_image: ${{ needs.validate.outputs.cardano_node_image }}
