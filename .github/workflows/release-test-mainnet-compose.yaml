@@ -68,6 +68,8 @@ env:
   NETWORK: mainnet
   RELEASE_VERSION: ${{ inputs.prerelease_tag }}
   REMOVE_SPENT_UTXOS: "false"
+  TOKEN_REGISTRY_ENABLED: "true"
+  TOKEN_REGISTRY_BASE_URL: http://zur2-s-d-115.colo2.cf-systems.internal:8080/api
 
 jobs:
   preflight:
