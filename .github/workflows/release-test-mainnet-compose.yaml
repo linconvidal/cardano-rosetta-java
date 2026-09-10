@@ -73,7 +73,7 @@ env:
 
 jobs:
   preflight:
-    runs-on: [self-hosted, rosetta-server-colo2]
+    runs-on: [rosetta-server-colo2]
     timeout-minutes: 180
     outputs:
       db_identity: ${{ steps.storage.outputs.db_identity }}
@@ -195,7 +195,7 @@ jobs:
 
   upgrade:
     needs: preflight
-    runs-on: [self-hosted, rosetta-server-colo2]
+    runs-on: [rosetta-server-colo2]
     timeout-minutes: 1440
     steps:
       - *checkout_automation
@@ -227,7 +227,7 @@ jobs:
     needs:
       - preflight
       - upgrade
-    runs-on: [self-hosted, rosetta-server-colo2]
+    runs-on: [rosetta-server-colo2]
     timeout-minutes: 5760
     steps:
       - *checkout_automation
@@ -325,7 +325,7 @@ jobs:
     needs:
       - preflight
       - clean-resync
-    runs-on: [self-hosted, rosetta-server-colo2]
+    runs-on: [rosetta-server-colo2]
     timeout-minutes: 720
     steps:
       - *checkout_automation

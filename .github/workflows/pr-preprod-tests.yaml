@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   test-on-preprod:
-    runs-on: [self-hosted, preview-server-colo2]
+    runs-on: [preview-server-colo2]
     concurrency:
       group: preprod-host-deployment
       cancel-in-progress: false

@@ -74,7 +74,7 @@ env:
 
 jobs:
   preflight:
-    runs-on: [self-hosted, mainnet-server-colo2]
+    runs-on: [mainnet-server-colo2]
     timeout-minutes: 180
     outputs:
       machine_specs: ${{ steps.machine.outputs.machine_specs }}
@@ -276,7 +276,7 @@ jobs:
 
   upgrade:
     needs: preflight
-    runs-on: [self-hosted, mainnet-server-colo2]
+    runs-on: [mainnet-server-colo2]
     timeout-minutes: 1440
     steps:
       - *checkout_automation
@@ -316,7 +316,7 @@ jobs:
     needs:
       - preflight
       - upgrade
-    runs-on: [self-hosted, mainnet-server-colo2]
+    runs-on: [mainnet-server-colo2]
     timeout-minutes: 5760
     steps:
       - *checkout_automation
@@ -443,7 +443,7 @@ jobs:
     needs:
       - preflight
       - clean-resync
-    runs-on: [self-hosted, mainnet-server-colo2]
+    runs-on: [mainnet-server-colo2]
     timeout-minutes: 720
     steps:
       - *checkout_automation
